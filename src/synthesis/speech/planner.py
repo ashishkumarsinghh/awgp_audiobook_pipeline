@@ -1,22 +1,29 @@
 from src.synthesis.models.document import Document, SemanticTag
 from src.synthesis.models.config import SynthesisConfig
+from src.synthesis.speech.pronunciation import PronunciationDictionary
 import unicodedata
 
 class SpeechPlanner:
     def __init__(self, config: SynthesisConfig):
         self.config = config
+        self.pronunciation_dict = PronunciationDictionary()
     
     def plan(self, doc: Document) -> list[dict]:
         plan = []
         for block in doc.blocks:
             # Enforce unicode NFC norm (rule 1)
             norm_text = unicodedata.normalize("NFC", block.text)
+            
+            # Apply phonetic overrides to the speech payload ONLY
+            speech_text = self.pronunciation_dict.apply(norm_text)
+            
             rate = self._get_rate(block.tag)
             pause_before, pause_after = self._get_pauses(block.tag)
             plan.append({
                 "block_id": block.block_id,
                 "tag": block.tag.value,
-                "text": norm_text,
+                "text": speech_text,
+                "original_text": norm_text,
                 "rate": rate,
                 "pause_before": pause_before,
                 "pause_after": pause_after
