@@ -84,11 +84,7 @@ class AudioEnhancer:
                 "c0 f=3200 w=1400 g=0.7 t=0|"
                 "c0 f=7800 w=3000 g=-0.8 t=0,"
             ),
-            "deesser="
-            "i=0.25:"
-            "m=0.5:"
-            "f=6500:"
-            "s=0.35,",
+            "deesser=i=0.25:m=0.5,",
             "acompressor="
             "threshold=-20dB:"
             "ratio=1.45:"
