@@ -569,7 +569,8 @@ def run_stage(project_name: str, stage: int, background_tasks: BackgroundTasks, 
 
         def _bg():
             try:
-                status_val = _execute_stage()
+                pm.run_stage_3_audio()
+                status_val = "04_Audio_Review"
                 with Session(engine) as session:
                     p = session.query(Project).filter(Project.name == project_name).first()
                     if p:
@@ -581,12 +582,15 @@ def run_stage(project_name: str, stage: int, background_tasks: BackgroundTasks, 
                 import traceback
                 traceback.print_exc()
                 print(f"Background stage 3 error: {e}")
-                with Session(engine) as session:
-                    p = session.query(Project).filter(Project.name == project_name).first()
-                    if p:
-                        p.status = "03_Phonetics"
-                        session.add(AuditLog(project_name=project_name, stage="03_Phonetics", action=f"AUDIO FAILED: {str(e)[:40]}", user_id=current_user.id))
-                        session.commit()
+                try:
+                    with Session(engine) as session:
+                        p = session.query(Project).filter(Project.name == project_name).first()
+                        if p:
+                            p.status = "03_Phonetics"
+                            session.add(AuditLog(project_name=project_name, stage="03_Phonetics", action=f"AUDIO FAILED: {str(e)[:40]}", user_id=current_user.id))
+                            session.commit()
+                except Exception as db_err:
+                    print(f"Failed to update error status in DB: {db_err}")
                 
         background_tasks.add_task(_bg)
         return {"status": "success", "stage": stage, "async": True, "new_status": "03_Synthesizing", "message": "Audio generation started in background"}

@@ -1,82 +1,111 @@
 import re
 from typing import List
 from src.core.types import SpeechSegment
+from src.synthesis.parser.xml_parser import XMLParser
+from src.synthesis.models.document import SemanticTag
 
 class SemanticSegmenter:
-    def __init__(self, narration_profile):
+    def __init__(self, narration_profile=None, sentences_per_chunk=5, max_chars_per_chunk=1000):
         self.profile = narration_profile
+        self.sentences_per_chunk = sentences_per_chunk
+        self.max_chars_per_chunk = max_chars_per_chunk
+
+    def _split_into_sentences(self, text: str) -> List[str]:
+        """Splits Hindi/Devanagari prose into individual sentences preserving punctuation and quotes."""
+        text = re.sub(r'\s+', ' ', text).strip()
+        if not text:
+            return []
+        
+        pattern = r'([^।॥!?.\n]+(?:[।॥!?.]|$)[\"\'\”\’]*)'
+        matches = [m.strip() for m in re.findall(pattern, text) if m.strip()]
+        return matches if matches else [text]
+
+    def _clean_tags(self, text: str) -> str:
+        """Removes all XML/HTML tags like <prose>, </prose>, <heading>, etc."""
+        cleaned = re.sub(r'<[^>]+>', '', text)
+        return re.sub(r'\s+', ' ', cleaned).strip()
 
     def segment_text(self, text: str) -> List[SpeechSegment]:
+        if not text or not text.strip():
+            return []
+
         segments = []
         
-        # 1. Normalize line breaks first
-        text = text.replace('\n', ' ')
-        text = re.sub(r'\s+', ' ', text).strip()
+        # 1. Parse into semantic document blocks using XMLParser
+        doc = XMLParser.parse(text)
         
-        # 2. Extract quotes vs non-quotes
-        tokens = re.split(r'(["\'\“\‘].*?["\'\”\’])', text)
-        
-        for token in tokens:
-            token = token.strip()
-            if not token:
+        for block in doc.blocks:
+            clean_content = self._clean_tags(block.text)
+            if not clean_content:
                 continue
-                
-            is_quote = bool(re.match(r'^[\"\'\“\‘].*[\"\'\”\’]$', token))
-            clean_text = re.sub(r'[\"\'\“\‘\”\’]', '', token).strip()
-            
-            if is_quote:
+
+            tag = block.tag
+
+            if tag == SemanticTag.HEADING:
                 segments.append(SpeechSegment(
-                    source_text=token,
-                    normalized_text=clean_text,
-                    pronunciation_text=clean_text,
-                    segment_type="quote"
+                    source_text=clean_content,
+                    normalized_text=clean_content,
+                    pronunciation_text=clean_content,
+                    segment_type="heading",
+                    pause_after_ms=1000
                 ))
-                continue
-            
-            # 3. For non-quotes, split by major sentence boundaries
-            blocks = re.split(r'(\|\||\||\।|\.|\?|\!)', token)
-            
-            sentences = []
-            for i in range(0, len(blocks)-1, 2):
-                sentences.append((blocks[i] + blocks[i+1]).strip())
-            if len(blocks) % 2 != 0 and blocks[-1].strip():
-                sentences.append(blocks[-1].strip())
-                
-            # 4. Clause Chunking for long sentences
-            for sentence in sentences:
-                sentence = sentence.strip()
-                if not sentence: continue
-                
-                words = sentence.split()
-                segment_type = "prose"
-                if "ॐ" in sentence or "भूर्भुवः" in sentence:
-                    segment_type = "mantra"
-                elif len(words) < 8 and not sentence.endswith(("।", ".", "|", "||", "?", "!")):
-                    segment_type = "heading"
-                elif "|" in sentence or "।" in sentence:
-                    segment_type = "prose" if "।" in sentence else "shloka"
-                    
-                # If sentence > 12 words and has a comma, split on comma
-                if len(words) > 12 and "," in sentence:
-                    clauses = sentence.split(",")
-                    for idx, clause in enumerate(clauses):
-                        clause = clause.strip()
-                        if not clause: continue
-                        
-                        seg = SpeechSegment(
-                            source_text=clause,
-                            normalized_text=clause,
-                            pronunciation_text=clause,
-                            segment_type=segment_type,
-                            pause_after_ms=150 if idx < len(clauses)-1 else 0
-                        )
-                        segments.append(seg)
-                else:
+            elif tag == SemanticTag.SUBHEADING:
+                segments.append(SpeechSegment(
+                    source_text=clean_content,
+                    normalized_text=clean_content,
+                    pronunciation_text=clean_content,
+                    segment_type="subheading",
+                    pause_after_ms=600
+                ))
+            elif tag == SemanticTag.SHLOKA:
+                segments.append(SpeechSegment(
+                    source_text=clean_content,
+                    normalized_text=clean_content,
+                    pronunciation_text=clean_content,
+                    segment_type="shloka",
+                    pause_after_ms=800
+                ))
+            elif tag == SemanticTag.GLOSS:
+                segments.append(SpeechSegment(
+                    source_text=clean_content,
+                    normalized_text=clean_content,
+                    pronunciation_text=clean_content,
+                    segment_type="gloss",
+                    pause_after_ms=500
+                ))
+            else:
+                # Prose block: group into 5-6 sentences per chunk for optimal audiobook listening
+                sentences = self._split_into_sentences(clean_content)
+                if not sentences:
+                    sentences = [clean_content]
+
+                current_sentences = []
+                current_chars = 0
+
+                for sent in sentences:
+                    current_sentences.append(sent)
+                    current_chars += len(sent)
+
+                    if len(current_sentences) >= self.sentences_per_chunk or current_chars >= self.max_chars_per_chunk:
+                        chunk_str = " ".join(current_sentences)
+                        segments.append(SpeechSegment(
+                            source_text=chunk_str,
+                            normalized_text=chunk_str,
+                            pronunciation_text=chunk_str,
+                            segment_type="prose",
+                            pause_after_ms=450
+                        ))
+                        current_sentences = []
+                        current_chars = 0
+
+                if current_sentences:
+                    chunk_str = " ".join(current_sentences)
                     segments.append(SpeechSegment(
-                        source_text=sentence,
-                        normalized_text=sentence,
-                        pronunciation_text=sentence,
-                        segment_type=segment_type
+                        source_text=chunk_str,
+                        normalized_text=chunk_str,
+                        pronunciation_text=chunk_str,
+                        segment_type="prose",
+                        pause_after_ms=500
                     ))
-                    
+
         return segments

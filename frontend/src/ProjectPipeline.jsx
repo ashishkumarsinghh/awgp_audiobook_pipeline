@@ -126,15 +126,18 @@ function ProjectPipeline() {
     }
   }, [phoneticsData])
 
-  // Automatically transition when background synthesis completes
+  // Automatically transition and refresh queries when background synthesis completes
   useEffect(() => {
-    if (projectDetails?.status === '04_Audio_Review' && currentStep === 3) {
-      setCurrentStep(4)
+    if (projectDetails?.status === '04_Audio_Review') {
       queryClient.invalidateQueries({ queryKey: ['segments', project] })
+      queryClient.invalidateQueries({ queryKey: ['phonetics', project] })
       queryClient.invalidateQueries({ queryKey: ['projectDetails', project] })
       queryClient.invalidateQueries({ queryKey: ['artifacts', project] })
+      if (currentStep === 3) {
+        setCurrentStep(4)
+      }
     }
-  }, [projectDetails?.status, currentStep, project, queryClient])
+  }, [projectDetails?.status])
 
   // Automatically navigate to active stage on first load
   useEffect(() => {
@@ -245,6 +248,7 @@ function ProjectPipeline() {
       queryClient.invalidateQueries({ queryKey: ['rawText', project] })
       queryClient.invalidateQueries({ queryKey: ['segments', project] })
       queryClient.invalidateQueries({ queryKey: ['phonetics', project] })
+      queryClient.invalidateQueries({ queryKey: ['artifacts', project] })
     }
   })
 

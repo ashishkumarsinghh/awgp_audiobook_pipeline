@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import edge_tts
 from typing import List
@@ -15,6 +16,10 @@ class EdgeTTSProvider(TTSProvider):
     async def synthesize(self, segment: SpeechSegment, output_path: str) -> str:
         text = segment.pronunciation_text or segment.normalized_text or segment.source_text
         text = text.strip() if text else ""
+        
+        # Scrub any stray XML/HTML markup (e.g. <prose>, <shloka>, <heading>)
+        text = re.sub(r'<[^>]+>', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
         
         is_wav = output_path.endswith(".wav")
         # Ensure temporary MP3 has a strictly distinct filename from final WAV
