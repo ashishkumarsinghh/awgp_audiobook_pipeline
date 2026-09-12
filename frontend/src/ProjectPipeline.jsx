@@ -112,22 +112,6 @@ function ProjectPipeline() {
     }
   }, [phoneticsData])
 
-  // Track elapsed seconds during time-consuming operations (e.g. Gemini OCR)
-  useEffect(() => {
-    let interval = null
-    if (runStageMutation.isPending) {
-      setElapsedSeconds(0)
-      interval = setInterval(() => {
-        setElapsedSeconds(prev => prev + 1)
-      }, 1000)
-    } else {
-      setElapsedSeconds(0)
-    }
-    return () => {
-      if (interval) clearInterval(interval)
-    }
-  }, [runStageMutation.isPending])
-
   // Automatically transition when background synthesis completes
   useEffect(() => {
     if (projectDetails?.status === '04_Audio_Review' && currentStep === 3) {
@@ -245,6 +229,22 @@ function ProjectPipeline() {
       queryClient.invalidateQueries({ queryKey: ['phonetics', project] })
     }
   })
+
+  // Track elapsed seconds during time-consuming operations (e.g. Gemini OCR)
+  useEffect(() => {
+    let interval = null
+    if (runStageMutation.isPending) {
+      setElapsedSeconds(0)
+      interval = setInterval(() => {
+        setElapsedSeconds(prev => prev + 1)
+      }, 1000)
+    } else {
+      setElapsedSeconds(0)
+    }
+    return () => {
+      if (interval) clearInterval(interval)
+    }
+  }, [runStageMutation.isPending])
 
   const pdfUrl = `http://localhost:8000/api/projects/${project}/pdf?token=${user?.token}`
 
