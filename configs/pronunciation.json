@@ -1,0 +1,34 @@
+[
+    {
+        "source": "स्वः",
+        "tts_alias": "स्वाहा",
+        "context": "mantra",
+        "confidence": "EXACT",
+        "category": "Sanskrit",
+        "notes": "DO NOT globally replace. Only context-dependent."
+    },
+    {
+        "source": "ऋषिः",
+        "tts_alias": "रिशिह",
+        "context": "general",
+        "confidence": "FALLBACK",
+        "category": "Sanskrit",
+        "notes": "EdgeTTS approximation"
+    },
+    {
+        "source": "तत्त्वज्ञानार्थदर्शनम्",
+        "tts_alias": "तत्त्व-ज्ञानार्थ-दर्शनम्",
+        "context": "general",
+        "confidence": "EXACT",
+        "category": "Sanskrit",
+        "notes": "Attention head forcing via hyphenation"
+    },
+    {
+        "source": "प्रज्ञावर्धनं",
+        "tts_alias": "प्रज्ञा-वर्धनं",
+        "context": "general",
+        "confidence": "EXACT",
+        "category": "Sanskrit",
+        "notes": "Attention head forcing"
+    }
+]

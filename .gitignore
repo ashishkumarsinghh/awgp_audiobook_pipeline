@@ -1,7 +1,66 @@
-.env
-venv/
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.pdf
-*.txt
+*.py[cod]
+*$py.class
+*.so
+
+# Environments & Dependencies
+.env
+.env.*
+venv/
+env/
+ENV/
+.venv/
+node_modules/
+frontend/node_modules/
+
+# Build & Bundler Artifacts
+dist/
+build/
+*.egg-info/
+frontend/dist/
+
+# Testing & Coverage
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.cover
+.tox/
+.nox/
+
+# Database & Runtime Data
+*.db
+*.sqlite
+*.sqlite3
+projects/*
+!projects/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# Large Models & Binaries
+piper_models/
+*.onnx
+*.onnx.json
+
+# Media Outputs
+*.mp3
+*.wav
+*.ogg
+*.flac
+*.pdf
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Editor & OS Artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
