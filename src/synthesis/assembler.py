@@ -14,21 +14,23 @@ class AudioAssembler:
         """Generate a silent wav file of given duration in ms."""
         duration_sec = duration_ms / 1000.0
         if not os.path.exists(output_path):
-            cmd = f"ffmpeg -y -f lavfi -i aevalsrc=0 -t {duration_sec} -ar 24000 -ac 1 -c:a pcm_s16le {output_path} > /dev/null 2>&1"
+            cmd = f"ffmpeg -y -f lavfi -i aevalsrc=0 -t {duration_sec} -ar 24000 -ac 1 -c:a pcm_s16le '{output_path}' -loglevel error"
             os.system(cmd)
 
     def assemble(self, segments: List[SpeechSegment]):
         print(f"[Assembler] Assembling {len(segments)} segments into {self.output_file}...")
         
         concat_file_path = os.path.join(self.work_dir, "concat_list.txt")
+        valid_segments_count = 0
         
         with open(concat_file_path, "w", encoding="utf-8") as f:
-            for i, seg in enumerate(segments):
-                if not seg.audio_file or not os.path.exists(seg.audio_file):
+            for seg in segments:
+                if not seg.audio_file or not os.path.exists(seg.audio_file) or os.path.getsize(seg.audio_file) < 100:
                     continue
                 
                 # Write the actual audio chunk (.wav)
                 f.write(f"file '{os.path.abspath(seg.audio_file)}'\n")
+                valid_segments_count += 1
                 
                 # If there's a pause after, inject a silent chunk (.wav)
                 if seg.pause_after_ms > 0:
@@ -36,13 +38,16 @@ class AudioAssembler:
                     self._generate_silence(seg.pause_after_ms, silence_file)
                     f.write(f"file '{os.path.abspath(silence_file)}'\n")
                     
+        if valid_segments_count == 0:
+            raise RuntimeError("No valid audio chunks found to assemble. Generate audio first.")
+
         # Concatenate using ffmpeg
-        print("[Mastering] Concatenating and mastering lossless WAVs...")
+        print(f"[Mastering] Concatenating {valid_segments_count} lossless WAVs with EBU R128 mastering...")
         mastering_filter = "loudnorm=I=-18:LRA=11:TP=-1.5"
-        cmd = f"ffmpeg -y -f concat -safe 0 -i {concat_file_path} -af {mastering_filter} -c:a libmp3lame -q:a 2 {self.output_file} > /dev/null 2>&1"
+        cmd = f"ffmpeg -y -f concat -safe 0 -i '{concat_file_path}' -af {mastering_filter} -c:a libmp3lame -q:a 2 '{self.output_file}' -loglevel error"
         
         exit_code = os.system(cmd)
         if exit_code == 0:
             print(f"[Mastering] Final output ready at {self.output_file}")
         else:
-            print(f"[Mastering] Failed to assemble audio. Ensure ffmpeg is installed.")
+            raise RuntimeError(f"Failed to assemble audio. FFmpeg exited with code {exit_code}")

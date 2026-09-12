@@ -33,3 +33,15 @@ class AuditLog(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     timestamp = Column(DateTime, server_default=func.now())
     details = Column(Text, nullable=True)
+
+class Artifact(Base):
+    __tablename__ = "artifacts"
+    id = Column(Integer, primary_key=True, index=True)
+    project_name = Column(String, index=True)
+    stage = Column(String, index=True) # e.g., "00_OCR", "01_Text_Refinement", "02_Segmentation", "03_Phonetics", "04_Audio", "05_Mastered"
+    filename = Column(String, index=True) # e.g. "asd_ocr_raw_admin_20260912_143000.txt"
+    file_type = Column(String) # "txt", "json", "wav", "mp3"
+    file_size = Column(Integer, default=0)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    username = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())

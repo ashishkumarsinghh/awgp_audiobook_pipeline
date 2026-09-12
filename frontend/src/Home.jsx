@@ -16,7 +16,7 @@ export default function Home() {
           </div>
           <div className="flex flex-1 justify-end gap-4">
             <Link to="/login" className="text-sm font-semibold leading-6 text-slate-900">
-              Log in <span aria-hidden="true">&rarr;</span>
+              Log in <span aria-hidden="true">→</span>
             </Link>
             <Link to="/register" className="text-sm font-semibold leading-6 text-white bg-blue-600 hover:bg-blue-500 px-3 py-1 rounded-md">
               Join as Volunteer

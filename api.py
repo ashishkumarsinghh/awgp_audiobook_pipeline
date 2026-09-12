@@ -1,4 +1,5 @@
 import os
+import re
 import json
 from dotenv import load_dotenv
 
@@ -20,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from src.pipeline_v3 import ProjectManager
 from src.db.database import engine, Base, get_db
-from src.db.models import User, AuditLog, Project
+from src.db.models import User, AuditLog, Project, Artifact
 
 # Init DB
 Base.metadata.create_all(bind=engine)
@@ -70,8 +71,48 @@ def get_current_user(
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
         return user
-    except jwt.PyJWTError as e:
+    except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Could not validate credentials")
+
+
+def save_artifact_record(
+    db: Session,
+    project_name: str,
+    stage: str,
+    file_type: str,
+    source_file: str,
+    username: str,
+    user_id: Optional[int] = None
+) -> Optional[str]:
+    """Saves a timestamped, user-tagged version of an artifact to artifacts/ and records in DB."""
+    if not os.path.exists(source_file):
+        return None
+    # Include microsecond segment to ensure uniqueness even in rapid automated tests
+    now_str = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+    clean_username = re.sub(r'[^a-zA-Z0-9_]', '', username or "system")
+    clean_book = re.sub(r'[^a-zA-Z0-9_]', '', project_name)
+    stage_slug = stage.lower().replace(" ", "_")
+    artifact_filename = f"{clean_book}_{stage_slug}_{clean_username}_{now_str}.{file_type}"
+    
+    artifacts_dir = os.path.join(PROJECTS_DIR, project_name, "artifacts")
+    os.makedirs(artifacts_dir, exist_ok=True)
+    target_path = os.path.join(artifacts_dir, artifact_filename)
+    
+    shutil.copyfile(source_file, target_path)
+    file_size = os.path.getsize(target_path)
+    
+    art = Artifact(
+        project_name=project_name,
+        stage=stage,
+        filename=artifact_filename,
+        file_type=file_type,
+        file_size=file_size,
+        user_id=user_id,
+        username=username
+    )
+    db.add(art)
+    db.commit()
+    return artifact_filename
 
 
 class UserCreate(BaseModel):
@@ -128,6 +169,9 @@ async def create_project(
     log = AuditLog(project_name=name, stage="00_Ingested", action="UPLOADED PDF", user_id=user_id)
     db.add(log)
     db.commit()
+
+    # Save artifact record
+    save_artifact_record(db, name, "00_pdf_ingested", "pdf", pdf_path, current_user.username, user_id)
         
     return {"status": "success", "project": name, "stage": "00_Ingested"}
 
@@ -270,7 +314,7 @@ def _get_project_artifacts(project_name: str) -> dict:
             pass
     if os.path.exists(audio_dir):
         try:
-            completed_chunks = len([f for f in os.listdir(audio_dir) if f.endswith(".wav")])
+            completed_chunks = len([f for f in os.listdir(audio_dir) if f.endswith(".wav") and os.path.getsize(os.path.join(audio_dir, f)) > 100])
         except Exception:
             pass
             
@@ -293,26 +337,26 @@ def _get_project_artifacts(project_name: str) -> dict:
 
 @app.get("/api/projects")
 def list_projects(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    user = current_user
     projects_db = db.query(Project).all()
+    user = current_user
     
-    if user.role == "admin":
-        projects = projects_db
-    else:
-        projects = [p for p in projects_db if p.assigned_to == user.id]
-        
+    # Editors see assigned projects, admins see all
+    projects = projects_db if user.role == "admin" else [p for p in projects_db if p.assigned_to == user.id]
+    
     result = []
     for p in projects:
-        assigned_user = db.query(User).filter(User.id == p.assigned_to).first() if p.assigned_to else None
         artifacts = _get_project_artifacts(p.name)
+        assigned_user = db.query(User).filter(User.id == p.assigned_to).first() if p.assigned_to else None
         result.append({
             "id": p.id,
             "name": p.name,
             "status": p.status,
             "created_at": p.created_at.timestamp() if p.created_at else 0,
             "assigned_to": p.assigned_to,
+            "assigned_to_name": assigned_user.username if assigned_user else "Unassigned",
             "assigned_username": assigned_user.username if assigned_user else "Unassigned",
             "is_assigned_to_me": (p.assigned_to == user.id),
+            "artifacts": artifacts,
             **artifacts
         })
         
@@ -323,39 +367,36 @@ def list_projects(db: Session = Depends(get_db), current_user: User = Depends(ge
         "mastered": len([p for p in projects_db if p.status == "05_Mastered"]),
         "audio_review": len([p for p in projects_db if p.status == "04_Audio_Review"])
     }
-        
-    return {"projects": sorted(result, key=lambda x: x["created_at"], reverse=True), "metrics": metrics}
+    
+    return {"projects": sorted(result, key=lambda x: x.get("created_at") or 0, reverse=True), "metrics": metrics}
 
-
-@app.get("/api/projects/{project_name}")
-def get_project_details(project_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    p = db.query(Project).filter(Project.name == project_name).first()
+@app.get("/api/projects/{name}")
+def get_project_details(name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    p = db.query(Project).filter(Project.name == name).first()
     if not p:
         raise HTTPException(status_code=404, detail="Project not found")
         
-    # Auto-claim if project is currently unassigned
-    if p.assigned_to is None and current_user.role == "editor":
-        p.assigned_to = current_user.id
-        current_user.allocation_status = "active"
-        db.commit()
-        
+    artifacts = _get_project_artifacts(name)
     assigned_user = db.query(User).filter(User.id == p.assigned_to).first() if p.assigned_to else None
-    artifacts = _get_project_artifacts(p.name)
+    
     return {
         "id": p.id,
         "name": p.name,
         "status": p.status,
-        "created_at": p.created_at.timestamp() if p.created_at else 0,
         "assigned_to": p.assigned_to,
+        "assigned_to_name": assigned_user.username if assigned_user else "Unassigned",
         "assigned_username": assigned_user.username if assigned_user else "Unassigned",
+        "is_assigned_to_me": (p.assigned_to == current_user.id),
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "artifacts": artifacts,
         **artifacts
     }
 
 @app.get("/api/projects/{project_name}/pdf")
-def get_pdf(project_name: str, current_user: User = Depends(get_current_user)):
+def get_pdf(project_name: str, token: Optional[str] = Query(None), current_user: User = Depends(get_current_user)):
     file_path = os.path.join(PROJECTS_DIR, project_name, "00_scanned.pdf")
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="PDF not found")
+        raise HTTPException(status_code=404, detail="PDF file not found")
     return FileResponse(file_path, media_type="application/pdf")
 
 @app.get("/api/projects/{project_name}/raw")
@@ -368,27 +409,24 @@ def get_raw_text(project_name: str, current_user: User = Depends(get_current_use
     
     if os.path.exists(clean_path):
         with open(clean_path, "r", encoding="utf-8") as f:
-            c = f.read()
-            if not c.startswith("OCR failed:"):
-                clean_content = c
-                
+            clean_content = f.read()
+            
     if os.path.exists(raw_path):
         with open(raw_path, "r", encoding="utf-8") as f:
-            r = f.read()
-            if not r.startswith("OCR failed:"):
-                raw_content = r
-                
-    has_clean = bool(clean_content.strip())
-    has_raw = bool(raw_content.strip())
+            raw_content = f.read()
             
-    if not has_clean and not has_raw:
-        raise HTTPException(status_code=404, detail="Raw text not found")
+    has_clean = bool(clean_content and not clean_content.startswith("OCR failed:"))
+    
+    if not clean_content and not raw_content:
+        raise HTTPException(status_code=404, detail="No text found. Please run OCR (Stage 0).")
         
+    effective_text = clean_content if has_clean else raw_content
+    
     return {
         "raw_text": raw_content,
         "clean_text": clean_content,
-        "has_clean": has_clean,
-        "text": clean_content if has_clean else raw_content
+        "text": effective_text,
+        "has_clean": has_clean
     }
 
 @app.put("/api/projects/{project_name}/raw")
@@ -399,6 +437,7 @@ def save_raw_text(project_name: str, payload: dict, db: Session = Depends(get_db
     file_path = os.path.join(p_dir, "01_ocr_raw.txt")
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(text)
+    save_artifact_record(db, project_name, "00_ocr_raw", "txt", file_path, current_user.username, current_user.id)
     log = AuditLog(project_name=project_name, stage="01_OCR_Done", action="SAVED RAW TEXT", user_id=current_user.id)
     db.add(log)
     db.commit()
@@ -412,6 +451,7 @@ def save_clean_text(project_name: str, payload: dict, db: Session = Depends(get_
     file_path = os.path.join(p_dir, "02_text_cleaned.txt")
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(text)
+    save_artifact_record(db, project_name, "01_text_cleaned", "txt", file_path, current_user.username, current_user.id)
     log = AuditLog(project_name=project_name, stage="01_OCR_Done", action="SAVED CLEANED TEXT", user_id=current_user.id)
     db.add(log)
     db.commit()
@@ -436,12 +476,12 @@ def update_segments(project_name: str, updates: List[Dict[str, Any]], db: Sessio
     
     target_file = pm.phonetics_file if os.path.exists(pm.phonetics_file) else pm.segments_file
     if not os.path.exists(target_file):
-        # Create segments file if not existing
         target_file = pm.segments_file
         
     with open(target_file, "w", encoding="utf-8") as f:
         json.dump(updates, f, ensure_ascii=False, indent=4)
         
+    save_artifact_record(db, project_name, "02_segments", "json", target_file, current_user.username, current_user.id)
     log = AuditLog(project_name=project_name, stage="02_Segmentation", action="UPDATED SEGMENTS", user_id=current_user.id)
     db.add(log)
     db.commit()
@@ -460,6 +500,7 @@ def update_phonetics(project_name: str, updates: List[Dict[str, Any]], db: Sessi
     pm = ProjectManager(os.path.join(PROJECTS_DIR, project_name))
     with open(pm.phonetics_file, "w", encoding="utf-8") as f:
         json.dump(updates, f, ensure_ascii=False, indent=4)
+    save_artifact_record(db, project_name, "03_phonetics", "json", pm.phonetics_file, current_user.username, current_user.id)
     log = AuditLog(project_name=project_name, stage="03_Phonetics", action="UPDATED PHONETICS", user_id=current_user.id)
     db.add(log)
     db.commit()
@@ -474,28 +515,25 @@ def run_stage(project_name: str, stage: int, background_tasks: BackgroundTasks, 
     def _execute_stage():
         if stage == 0:
             pm.run_stage_1_ocr()
-            if os.path.exists(pm.clean_file):
-                try:
-                    with open(pm.clean_file, "r", encoding="utf-8") as f:
-                        if f.read(50).startswith("OCR failed:"):
-                            os.remove(pm.clean_file)
-                except Exception:
-                    pass
+            save_artifact_record(db, project_name, "00_ocr_raw", "txt", pm.raw_file, current_user.username, current_user.id)
             return "01_OCR_Done"
         elif stage == 1: 
             pm.run_stage_1_segmentation()
+            save_artifact_record(db, project_name, "02_segments", "json", pm.segments_file, current_user.username, current_user.id)
             return "02_Segmentation"
         elif stage == 2: 
             pm.run_stage_2_phonetics()
+            save_artifact_record(db, project_name, "03_phonetics", "json", pm.phonetics_file, current_user.username, current_user.id)
             return "03_Phonetics"
         elif stage == 3: 
             pm.run_stage_3_audio()
             return "04_Audio_Review"
         elif stage == 4: 
             pm.run_stage_4_mastering()
+            save_artifact_record(db, project_name, "05_mastered", "mp3", pm.master_file, current_user.username, current_user.id)
             return "05_Mastered"
 
-    # Fast synchronous stages: 0 (if cached or quick), 1 (segmentation), 2 (phonetics), 4 (mastering)
+    # Fast synchronous stages: 0 (OCR), 1 (segmentation), 2 (phonetics), 4 (mastering)
     if stage in [1, 2, 4]:
         try:
             status_val = _execute_stage()
@@ -509,7 +547,6 @@ def run_stage(project_name: str, stage: int, background_tasks: BackgroundTasks, 
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
     elif stage == 0:
-        # OCR Stage
         try:
             status_val = _execute_stage()
             proj = db.query(Project).filter(Project.name == project_name).first()
@@ -538,8 +575,11 @@ def run_stage(project_name: str, stage: int, background_tasks: BackgroundTasks, 
                     if p:
                         p.status = status_val
                         session.add(AuditLog(project_name=project_name, stage=status_val, action="AUDIO GENERATED", user_id=current_user.id))
+                        save_artifact_record(session, project_name, "04_audio_synthesis", "json", pm.phonetics_file, current_user.username, current_user.id)
                         session.commit()
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 print(f"Background stage 3 error: {e}")
                 with Session(engine) as session:
                     p = session.query(Project).filter(Project.name == project_name).first()
@@ -552,18 +592,51 @@ def run_stage(project_name: str, stage: int, background_tasks: BackgroundTasks, 
         return {"status": "success", "stage": stage, "async": True, "new_status": "03_Synthesizing", "message": "Audio generation started in background"}
 
 @app.get("/api/projects/{project_name}/audio/{chunk_id}")
-def get_audio(project_name: str, chunk_id: str):
+def get_audio(project_name: str, chunk_id: str, token: Optional[str] = Query(None)):
     file_path = os.path.join(PROJECTS_DIR, project_name, "05_audio_chunks", f"{chunk_id}.wav")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Audio chunk not found")
     return FileResponse(file_path, media_type="audio/wav")
 
 @app.get("/api/projects/{project_name}/mastered")
-def get_mastered_audio(project_name: str, current_user: User = Depends(get_current_user)):
+def get_mastered_audio(project_name: str, token: Optional[str] = Query(None), current_user: User = Depends(get_current_user)):
     file_path = os.path.join(PROJECTS_DIR, project_name, "06_mastered.mp3")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Mastered audio not found")
-    return FileResponse(file_path, media_type="audio/mpeg", filename=f"{project_name}_mastered.mp3")
+    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    download_filename = f"{project_name}_mastered_{current_user.username}_{now_str}.mp3"
+    return FileResponse(file_path, media_type="audio/mpeg", filename=download_filename)
+
+@app.get("/api/projects/{project_name}/artifacts")
+def list_artifacts(project_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    records = db.query(Artifact).filter(Artifact.project_name == project_name).order_by(Artifact.created_at.desc()).all()
+    return [
+        {
+            "id": r.id,
+            "stage": r.stage,
+            "filename": r.filename,
+            "file_type": r.file_type,
+            "file_size": r.file_size,
+            "username": r.username,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "download_url": f"/api/projects/{project_name}/artifacts/{r.filename}"
+        }
+        for r in records
+    ]
+
+@app.get("/api/projects/{project_name}/artifacts/{filename}")
+def download_artifact(project_name: str, filename: str, token: Optional[str] = Query(None), current_user: User = Depends(get_current_user)):
+    safe_name = os.path.basename(filename)
+    file_path = os.path.join(PROJECTS_DIR, project_name, "artifacts", safe_name)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Artifact file not found")
+    media_type = "application/octet-stream"
+    if safe_name.endswith(".txt"): media_type = "text/plain; charset=utf-8"
+    elif safe_name.endswith(".json"): media_type = "application/json"
+    elif safe_name.endswith(".mp3"): media_type = "audio/mpeg"
+    elif safe_name.endswith(".wav"): media_type = "audio/wav"
+    elif safe_name.endswith(".pdf"): media_type = "application/pdf"
+    return FileResponse(file_path, media_type=media_type, filename=safe_name)
 
 @app.get("/api/projects/{project_name}/audit")
 def get_audit_logs(project_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

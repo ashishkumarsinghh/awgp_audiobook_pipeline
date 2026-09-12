@@ -371,7 +371,7 @@ function Dashboard() {
               <BookOpenIcon className="w-12 h-12 text-slate-300 mx-auto mb-3" />
               <p className="font-medium text-slate-700">No projects found in pool</p>
               {user?.role === 'admin' && (
-                <p className="text-sm text-slate-400 mt-1">Click &quot;Add Book to Pool&quot; above to upload your first scanned PDF.</p>
+                <p className="text-sm text-slate-400 mt-1">Click "Add Book to Pool" above to upload your first scanned PDF.</p>
               )}
             </div>
           ) : (
@@ -446,7 +446,7 @@ function Dashboard() {
                           to={`/project/${project.name}`} 
                           className="inline-flex items-center text-xs font-semibold text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-md transition"
                         >
-                          Open Workspace &rarr;
+                          Open Workspace →
                         </Link>
                       </td>
                     </tr>

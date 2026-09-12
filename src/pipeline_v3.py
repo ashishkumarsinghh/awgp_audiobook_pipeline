@@ -58,7 +58,7 @@ class ProjectManager:
         
         with open(self.raw_file, 'w', encoding='utf-8') as f:
             f.write(text)
-        print("Stage 1 Complete: OCR saved.")
+        print("Stage 0 Complete: OCR saved.")
 
     def run_stage_1_segmentation(self):
         """Reads 02_text_cleaned.txt (or 01_ocr_raw.txt), segments it, saves to 03_segments.json"""
@@ -74,7 +74,7 @@ class ProjectManager:
             
         with open(self.segments_file, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
-        print("Stage 3 Complete.")
+        print(f"Stage 1 Complete: {len(data)} segments generated.")
 
     def run_stage_2_phonetics(self):
         """Reads 03_segments.json, applies phonetics/prosody, saves to 04_phonetics.json"""
@@ -86,17 +86,35 @@ class ProjectManager:
             
         segments = []
         for item in data:
-            seg = SpeechSegment(source_text=item["source_text"], normalized_text=item["source_text"], pronunciation_text=item["source_text"], segment_type=item["segment_type"], pause_after_ms=item.get("pause_after_ms", 0))
+            seg = SpeechSegment(
+                source_text=item.get("source_text", ""),
+                normalized_text=item.get("source_text", ""),
+                pronunciation_text=item.get("source_text", ""),
+                segment_type=item.get("segment_type", "prose"),
+                pause_after_ms=item.get("pause_after_ms", 0)
+            )
             seg.pronunciation_text = self.pronunciation.apply(seg.source_text, context=seg.segment_type)
             segments.append(seg)
             
         segments = self.prosody.apply_prosody(segments)
         
-        out_data = [{"id": data[i]["id"], "source_text": seg.source_text, "segment_type": seg.segment_type, "pronunciation_text": seg.pronunciation_text, "rate": seg.rate, "pitch": seg.pitch, "pause_after_ms": seg.pause_after_ms} for i, seg in enumerate(segments)]
+        out_data = [
+            {
+                "id": data[i]["id"],
+                "source_text": seg.source_text,
+                "segment_type": seg.segment_type,
+                "pronunciation_text": seg.pronunciation_text,
+                "rate": seg.rate,
+                "pitch": seg.pitch,
+                "volume": seg.volume,
+                "pause_after_ms": seg.pause_after_ms
+            }
+            for i, seg in enumerate(segments)
+        ]
             
         with open(self.phonetics_file, 'w', encoding='utf-8') as f:
             json.dump(out_data, f, ensure_ascii=False, indent=4)
-        print("Stage 4 Complete.")
+        print(f"Stage 2 Complete: {len(out_data)} phonetic segments saved.")
 
     def run_stage_3_audio(self):
         """Reads 04_phonetics.json, saves to 05_audio_chunks"""
@@ -108,24 +126,27 @@ class ProjectManager:
             
         segments = []
         for item in data:
-            seg = SpeechSegment(source_text=item["source_text"], normalized_text=item["source_text"], pronunciation_text=item["pronunciation_text"], segment_type=item["segment_type"], rate=item.get("rate", "+0%"), pitch=item.get("pitch", "+0Hz"), pause_after_ms=item.get("pause_after_ms", 0))
+            seg = SpeechSegment(
+                source_text=item.get("source_text", ""),
+                normalized_text=item.get("normalized_text", item.get("source_text", "")),
+                pronunciation_text=item.get("pronunciation_text", item.get("source_text", "")),
+                segment_type=item.get("segment_type", "prose"),
+                rate=item.get("rate", "+0%"),
+                pitch=item.get("pitch", "+0Hz"),
+                volume=item.get("volume", "+0%"),
+                pause_after_ms=item.get("pause_after_ms", 0)
+            )
             seg.audio_file = os.path.join(self.audio_dir, f"{item['id']}.wav")
             segments.append(seg)
             
         async def generate_all():
             for i, seg in enumerate(segments):
-                if not os.path.exists(seg.audio_file):
-                    print(f"Synthesizing {seg.audio_file}...")
-                    # Edge-TTS writes mp3 natively, we need to convert to wav to avoid padding
-                    tmp_mp3 = seg.audio_file.replace(".wav", ".mp3")
-                    await self.tts.synthesize(seg, tmp_mp3)
+                if not os.path.exists(seg.audio_file) or os.path.getsize(seg.audio_file) < 100:
+                    print(f"Synthesizing [{i+1}/{len(segments)}] {seg.audio_file}...")
+                    await self.tts.synthesize(seg, seg.audio_file)
                     
-                    # Convert to WAV using ffmpeg directly for lossless concatenation later
-                    os.system(f"ffmpeg -y -i '{tmp_mp3}' -acodec pcm_s16le -ar 24000 '{seg.audio_file}' -loglevel error")
-                    if os.path.exists(tmp_mp3):
-                        os.remove(tmp_mp3)
         asyncio.run(generate_all())
-        print("Stage 5 Complete.")
+        print(f"Stage 3 Complete: Synthesized {len(segments)} audio chunks.")
 
     def run_stage_4_mastering(self):
         """Reads 04_phonetics.json and 05_audio_chunks, assembles to 06_mastered.mp3"""
@@ -137,26 +158,37 @@ class ProjectManager:
             
         segments = []
         for item in data:
-            seg = SpeechSegment(source_text="", normalized_text="", pronunciation_text="", pause_after_ms=item.get("pause_after_ms", 0))
+            seg = SpeechSegment(
+                source_text=item.get("source_text", ""),
+                normalized_text=item.get("normalized_text", item.get("source_text", "")),
+                pronunciation_text=item.get("pronunciation_text", item.get("source_text", "")),
+                segment_type=item.get("segment_type", "prose"),
+                pause_after_ms=item.get("pause_after_ms", 0)
+            )
             audio_path = os.path.join(self.audio_dir, f"{item['id']}.wav")
             if os.path.exists(audio_path) and os.path.getsize(audio_path) > 100:
                 seg.audio_file = audio_path
                 segments.append(seg)
                 
-        if not segments: return
+        if not segments:
+            print("No audio chunks to master, skipping assembly.")
+            return
+            
         assembler = AudioAssembler(self.master_file)
         assembler.assemble(segments)
-        print("Stage 6 Complete.")
+        print("Stage 4 Complete: Mastered audiobook ready.")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True, help="Project directory path")
-    parser.add_argument("--stage", type=int, choices=[1, 2, 3, 4], help="Run a specific stage")
+    parser.add_argument("--stage", type=int, choices=[0, 1, 2, 3, 4], help="Run a specific stage")
     parser.add_argument("--all", action="store_true", help="Run all stages sequentially")
     args = parser.parse_args()
     
     manager = ProjectManager(args.project)
     
+    if args.stage == 0 or args.all:
+        manager.run_stage_1_ocr()
     if args.stage == 1 or args.all:
         manager.run_stage_1_segmentation()
     if args.stage == 2 or args.all:

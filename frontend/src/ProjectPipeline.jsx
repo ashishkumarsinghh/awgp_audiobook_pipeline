@@ -10,7 +10,8 @@ import {
   ArrowDownTrayIcon,
   ChevronRightIcon,
   ClockIcon,
-  BookOpenIcon
+  BookOpenIcon,
+  FolderIcon
 } from '@heroicons/react/24/solid'
 import WaveSurferPlayer from './WaveSurferPlayer'
 
@@ -34,6 +35,7 @@ function ProjectPipeline() {
   const [localPhonetics, setLocalPhonetics] = useState([])
   const [statusInitialized, setStatusInitialized] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
+  const [showArtifactsModal, setShowArtifactsModal] = useState(false)
 
   // 1. Fetch Project Metadata & Status (polls every 1.5s while audio is synthesizing)
   const { data: projectDetails, isLoading: loadingDetails, isError: errorDetails } = useQuery({
@@ -80,6 +82,18 @@ function ProjectPipeline() {
   })
 
   // 4. Fetch Phonetics
+    // 5. Fetch Artifacts History
+  const { data: artifactsList = [], refetch: refetchArtifacts } = useQuery({
+    queryKey: ['artifacts', project],
+    queryFn: async () => {
+      const res = await fetch(`http://localhost:8000/api/projects/${project}/artifacts`, {
+        headers: { 'Authorization': `Bearer ${user.token}` }
+      })
+      if (!res.ok) return []
+      return res.json()
+    }
+  })
+
   const { data: phoneticsData = [], isLoading: loadingPhonetics } = useQuery({
     queryKey: ['phonetics', project],
     queryFn: async () => {
@@ -118,6 +132,7 @@ function ProjectPipeline() {
       setCurrentStep(4)
       queryClient.invalidateQueries({ queryKey: ['segments', project] })
       queryClient.invalidateQueries({ queryKey: ['projectDetails', project] })
+      queryClient.invalidateQueries({ queryKey: ['artifacts', project] })
     }
   }, [projectDetails?.status, currentStep, project, queryClient])
 
@@ -156,6 +171,7 @@ function ProjectPipeline() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['rawText', project] })
       queryClient.invalidateQueries({ queryKey: ['projectDetails', project] })
+      queryClient.invalidateQueries({ queryKey: ['artifacts', project] })
     }
   })
 
@@ -173,6 +189,7 @@ function ProjectPipeline() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['segments', project] })
       queryClient.invalidateQueries({ queryKey: ['projectDetails', project] })
+      queryClient.invalidateQueries({ queryKey: ['artifacts', project] })
     }
   })
 
@@ -190,6 +207,7 @@ function ProjectPipeline() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['phonetics', project] })
       queryClient.invalidateQueries({ queryKey: ['projectDetails', project] })
+      queryClient.invalidateQueries({ queryKey: ['artifacts', project] })
     }
   })
 
@@ -258,7 +276,7 @@ function ProjectPipeline() {
       <header className="bg-white border-b border-slate-200 px-6 py-3 flex items-center justify-between shrink-0 shadow-xs z-20">
         <div className="flex items-center gap-3">
           <Link to="/dashboard" className="text-slate-500 hover:text-blue-600 font-semibold text-sm flex items-center gap-1 transition-colors">
-            &larr; Projects
+            ← Projects
           </Link>
           <ChevronRightIcon className="w-4 h-4 text-slate-300" />
           <div>
@@ -275,6 +293,14 @@ function ProjectPipeline() {
 
         {/* Action button in header if applicable */}
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => { refetchArtifacts(); setShowArtifactsModal(true); }}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
+            title="View saved artifacts with user attribution and timestamps"
+          >
+            <FolderIcon className="w-3.5 h-3.5 text-blue-600" />
+            <span>Artifacts ({artifactsList.length})</span>
+          </button>
           {projectDetails?.has_mastered && (
             <a 
               href={`http://localhost:8000/api/projects/${project}/mastered?token=${user?.token}`} 
@@ -560,7 +586,7 @@ function ProjectPipeline() {
                     onClick={() => setCurrentStep(1)} 
                     className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-2 rounded-lg text-xs transition cursor-pointer"
                   >
-                    Skip to Text Refinement &rarr;
+                    Skip to Text Refinement →
                   </button>
                 </div>
               </div>
@@ -624,7 +650,7 @@ function ProjectPipeline() {
                       className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs font-semibold shadow-xs transition cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                     >
                       {runStageMutation.isPending && <ArrowPathIcon className="w-3.5 h-3.5 animate-spin"/>}
-                      {runStageMutation.isPending ? 'Segmenting...' : 'Run Segmentation &rarr;'}
+                      {runStageMutation.isPending ? 'Segmenting...' : 'Run Segmentation →'}
                     </button>
                   </div>
                 </div>
@@ -684,7 +710,7 @@ function ProjectPipeline() {
                       className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs font-semibold cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                     >
                       {runStageMutation.isPending && <ArrowPathIcon className="w-3.5 h-3.5 animate-spin"/>}
-                      {runStageMutation.isPending ? 'Processing...' : 'Apply Phonetics &rarr;'}
+                      {runStageMutation.isPending ? 'Processing...' : 'Apply Phonetics →'}
                     </button>
                   </div>
                 </div>
@@ -807,7 +833,7 @@ function ProjectPipeline() {
                       className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs font-semibold cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                     >
                       {runStageMutation.isPending && <ArrowPathIcon className="w-3.5 h-3.5 animate-spin"/>}
-                      {runStageMutation.isPending ? 'Synthesizing...' : 'Generate Audio &rarr;'}
+                      {runStageMutation.isPending ? 'Synthesizing...' : 'Generate Audio →'}
                     </button>
                   </div>
                 </div>
@@ -925,13 +951,13 @@ function ProjectPipeline() {
                   <SpeakerWaveIcon className="w-12 h-12 text-slate-300 mx-auto mb-3" />
                   <p className="text-sm font-medium text-slate-700 mb-1">No audio chunks generated yet</p>
                   <p className="text-xs text-slate-400 mb-4 max-w-sm">
-                    Complete Stage 3 (Phonetic Scripting) and click &quot;Generate Audio&quot; to synthesize narration chunks.
+                    Complete Stage 3 (Phonetic Scripting) and click "Generate Audio" to synthesize narration chunks.
                   </p>
                   <button 
                     onClick={() => setCurrentStep(3)}
                     className="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-4 py-2 rounded-lg text-xs transition cursor-pointer"
                   >
-                    &larr; Go to Stage 3: Phonetic Scripting
+                    ← Go to Stage 3: Phonetic Scripting
                   </button>
                 </div>
               ) : (
@@ -1002,8 +1028,102 @@ function ProjectPipeline() {
 
         </main>
       </div>
+
+      {/* ========================================================================= */}
+      {/* ARTIFACTS & AUDIT MODAL */}
+      {/* ========================================================================= */}
+      {showArtifactsModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6 animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-4xl w-full flex flex-col max-h-[85vh] overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center">
+                  <FolderIcon className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900">Project Artifacts & Audit History</h2>
+                  <p className="text-xs text-slate-500">Every pipeline stage writes an immutable, timestamped artifact with editor attribution to the database</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowArtifactsModal(false)}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-200/50 transition cursor-pointer text-sm font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto flex-1">
+              {artifactsList.length === 0 ? (
+                <div className="text-center py-12 text-slate-400 text-xs">
+                  No artifacts generated yet. Run pipeline stages to create saved artifacts.
+                </div>
+              ) : (
+                <div className="border border-slate-200 rounded-xl overflow-hidden shadow-2xs">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 text-slate-500 font-semibold border-b border-slate-200">
+                        <th className="py-2.5 px-4">Artifact Filename</th>
+                        <th className="py-2.5 px-3">Stage</th>
+                        <th className="py-2.5 px-3">Editor</th>
+                        <th className="py-2.5 px-3">Timestamp</th>
+                        <th className="py-2.5 px-3">Size</th>
+                        <th className="py-2.5 px-3 text-right">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {artifactsList.map((art) => (
+                        <tr key={art.id} className="hover:bg-slate-50/80 transition-colors">
+                          <td className="py-2.5 px-4 font-mono font-medium text-slate-800 break-all">
+                            {art.filename}
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-[10px] font-semibold uppercase">
+                              {art.stage}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-600 font-medium">
+                            {art.username || 'system'}
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-500 font-mono text-[11px]">
+                            {art.created_at ? new Date(art.created_at).toLocaleString() : '—'}
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-500 font-mono text-[11px]">
+                            {art.file_size > 1024 * 1024
+                              ? `${(art.file_size / (1024 * 1024)).toFixed(1)} MB`
+                              : `${Math.round(art.file_size / 1024)} KB`}
+                          </td>
+                          <td className="py-2.5 px-3 text-right">
+                            <a
+                              href={`http://localhost:8000${art.download_url}?token=${user?.token}`}
+                              download
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700 text-[11px] font-semibold transition cursor-pointer"
+                            >
+                              <ArrowDownTrayIcon className="w-3 h-3" /> Download
+                            </a>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-3 bg-slate-50 border-t border-slate-200 flex justify-end shrink-0">
+              <button
+                onClick={() => setShowArtifactsModal(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold transition cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 export default ProjectPipeline
+
