@@ -1,6 +1,7 @@
-﻿import os
+import os
 import subprocess
 from pathlib import Path
+from src.synthesis.audio.io import run_ffmpeg
 
 
 class AudioEnhancer:
@@ -49,12 +50,7 @@ class AudioEnhancer:
 
     @staticmethod
     def _run(cmd):
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+        run_ffmpeg(cmd[1:])
 
     @classmethod
     def apply_studio_mastering(

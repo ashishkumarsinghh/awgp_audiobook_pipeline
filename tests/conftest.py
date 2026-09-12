@@ -8,6 +8,8 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+
 from api import app, get_db
 from src.db.models import Base, User
 

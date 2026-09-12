@@ -64,3 +64,6 @@ pnpm-debug.log*
 *~
 .DS_Store
 Thumbs.db
+
+# Automatic backups from the additive SQLite migration
+*.db.backup-*

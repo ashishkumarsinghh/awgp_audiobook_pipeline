@@ -12,7 +12,7 @@ def create_fake_wav(path, duration_ms=100):
         wav.setsampwidth(2)
         wav.setframerate(24000)
         num_frames = int((duration_ms / 1000) * 24000)
-        wav.writeframes(struct.pack('h', 0) * num_frames)
+        wav.writeframes(b''.join(struct.pack('<h', 2000 if i % 48 < 24 else -2000) for i in range(num_frames)))
 
 def test_speech_segment():
     seg = SpeechSegment(
@@ -39,14 +39,11 @@ def test_audio_assembler_lossless(tmp_path):
     seg2 = SpeechSegment(source_text="2", normalized_text="2", pronunciation_text="2", pause_after_ms=0)
     seg2.audio_file = w2
     
-    with patch('os.system') as mock_system:
-        mock_system.return_value = 0
+    def capture_master(input_path, output_path, **kwargs):
+        with wave.open(input_path, "rb") as combined:
+            assert combined.getnframes() == int(0.21 * 24000)
+        with open(output_path, "wb") as stream:
+            stream.write(b"mastered")
+    with patch("src.synthesis.assembler.AudioEnhancer.apply_studio_mastering", side_effect=capture_master):
         assembler.assemble([seg1, seg2])
-        
-        # Verify the concat file was written correctly
-        concat_file = os.path.join(str(tmp_path), "concat_list.txt")
-        assert os.path.exists(concat_file)
-        with open(concat_file, "r") as f:
-            content = f.read()
-            assert w1 in content
-            assert w2 in content
+    assert open(output, "rb").read() == b"mastered"

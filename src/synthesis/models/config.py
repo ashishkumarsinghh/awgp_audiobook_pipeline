@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Optional
 
 @dataclass
 class SpeechRates:
@@ -20,6 +21,13 @@ class PausesMs:
     gloss_before: int = 300
 
 @dataclass
+class TTSProviderConfig:
+    provider: str = "edge"
+    edge_voice: str = "hi-IN-SwaraNeural"
+    gemini_voice: str = "hi-IN-AaryaNeural"
+
+@dataclass
 class SynthesisConfig:
     rates: SpeechRates = field(default_factory=SpeechRates)
     pauses: PausesMs = field(default_factory=PausesMs)
+    tts_provider: TTSProviderConfig = field(default_factory=TTSProviderConfig)

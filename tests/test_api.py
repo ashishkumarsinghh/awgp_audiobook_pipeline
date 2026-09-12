@@ -57,7 +57,7 @@ def test_admin_allocate_user(client, db_session):
     editor_res = client.post("/api/signup", json={"username": "editor", "password": "pw"})
     editor_id = editor_res.json()["user_id"]
     
-    p = Project(name="test_book", status="00_Ingested")
+    p = Project(name="test_book", status="00_Starting")
     db_session.add(p)
     db_session.commit()
     project_id = p.id
@@ -76,7 +76,7 @@ def test_admin_direct_assign_project(client, db_session):
     editor_res = client.post("/api/signup", json={"username": "editor", "password": "pw"})
     editor_id = editor_res.json()["user_id"]
     
-    p = Project(name="direct_book", status="00_Ingested")
+    p = Project(name="direct_book", status="00_Starting")
     db_session.add(p)
     db_session.commit()
     
@@ -105,7 +105,7 @@ def test_list_projects(client, db_session):
     editor_token = editor_res.json()["token"]
     editor_id = editor_res.json()["user_id"]
     
-    p1 = Project(name="proj1", status="00_Ingested", assigned_to=None)
+    p1 = Project(name="proj1", status="00_Starting", assigned_to=None)
     p2 = Project(name="proj2", status="05_Mastered", assigned_to=editor_id)
     db_session.add_all([p1, p2])
     db_session.commit()
@@ -141,12 +141,12 @@ def test_create_project_and_get_details(client, tmp_path):
         assert detail_res.status_code == 200
         details = detail_res.json()
         assert details["name"] == "book_alpha"
-        assert details["status"] == "00_Ingested"
+        assert details["status"] == "00_Starting"
         assert details["has_pdf"] is True
     finally:
         api.PROJECTS_DIR = original_dir
 
-def test_clean_and_raw_text_endpoints(client, tmp_path):
+def test_clean_and_raw_text_endpoints(client, tmp_path, db_session):
     admin_res = client.post("/api/signup", json={"username": "admin", "password": "pw"})
     admin_token = admin_res.json()["token"]
     
@@ -157,6 +157,8 @@ def test_clean_and_raw_text_endpoints(client, tmp_path):
     try:
         headers = {"Authorization": f"Bearer {admin_token}"}
         proj_name = "test_text_proj"
+        db_session.add(Project(name=proj_name))
+        db_session.commit()
         proj_dir = tmp_path / proj_name
         proj_dir.mkdir(parents=True, exist_ok=True)
         
@@ -183,7 +185,7 @@ def test_clean_and_raw_text_endpoints(client, tmp_path):
     finally:
         api.PROJECTS_DIR = original_dir
 
-def test_segments_and_phonetics_persistence(client, tmp_path):
+def test_segments_and_phonetics_persistence(client, tmp_path, db_session):
     admin_res = client.post("/api/signup", json={"username": "admin", "password": "pw"})
     admin_token = admin_res.json()["token"]
     
@@ -194,6 +196,8 @@ def test_segments_and_phonetics_persistence(client, tmp_path):
     try:
         headers = {"Authorization": f"Bearer {admin_token}"}
         proj_name = "test_seg_proj"
+        db_session.add(Project(name=proj_name))
+        db_session.commit()
         proj_dir = tmp_path / proj_name
         proj_dir.mkdir(parents=True, exist_ok=True)
         
@@ -236,6 +240,8 @@ def test_audit_logs(client, tmp_path, db_session):
     try:
         headers = {"Authorization": f"Bearer {admin_token}"}
         proj_name = "audit_book"
+        db_session.add(Project(name=proj_name))
+        db_session.commit()
         proj_dir = tmp_path / proj_name
         proj_dir.mkdir(parents=True, exist_ok=True)
         

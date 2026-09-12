@@ -90,21 +90,16 @@ def test_edge_tts_provider_tag_stripping(tmp_path):
         pronunciation_text="<prose>गायत्री साधना</prose>",
         segment_type="prose"
     )
-    out_wav = str(tmp_path / "out.wav")
+    output = str(tmp_path / "out.mp3")
 
     async def _run():
+        from pathlib import Path
         with patch("edge_tts.Communicate") as mock_comm:
             mock_instance = AsyncMock()
+            mock_instance.save.side_effect = lambda path: Path(path).write_bytes(b"mock encoded speech")
             mock_comm.return_value = mock_instance
-            with patch("os.system") as mock_sys:
-                mock_sys.return_value = 0
-                with patch("os.path.exists", return_value=True):
-                    await provider.synthesize(seg, out_wav)
-                    
-            # Ensure Communicate was invoked with stripped text
-            call_kwargs = mock_comm.call_args[1]
-            assert "<prose>" not in call_kwargs["text"]
-            assert "</prose>" not in call_kwargs["text"]
-            assert call_kwargs["text"] == "गायत्री साधना"
+            await provider.synthesize(seg, output)
+            assert mock_comm.call_args.kwargs["text"] == "गायत्री साधना"
+            assert Path(output).read_bytes() == b"mock encoded speech"
 
     asyncio.run(_run())

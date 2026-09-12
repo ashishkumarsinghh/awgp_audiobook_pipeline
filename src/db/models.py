@@ -19,8 +19,10 @@ class Project(Base):
     __tablename__ = 'projects'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
-    status = Column(String, default='01_Raw_Text')
-    assigned_to = Column(Integer, ForeignKey('users.id'), nullable=True)
+    status = Column(String, default='00_Starting', index=True)
+    assigned_to = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
+    tts_provider = Column(String, default='edge')
+    tts_voice = Column(String, default='hi-IN-SwaraNeural')
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -28,10 +30,10 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
     id = Column(Integer, primary_key=True, index=True)
     project_name = Column(String, index=True)
-    stage = Column(String)
-    action = Column(String) # e.g., "APPROVED", "EDITED"
-    user_id = Column(Integer, ForeignKey("users.id"))
-    timestamp = Column(DateTime, server_default=func.now())
+    stage = Column(String, index=True)
+    action = Column(String)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True)
+    timestamp = Column(DateTime, server_default=func.now(), index=True)
     details = Column(Text, nullable=True)
 
 class Artifact(Base):

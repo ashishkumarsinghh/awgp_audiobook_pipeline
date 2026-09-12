@@ -49,7 +49,7 @@ function ProjectPipeline() {
     },
     refetchInterval: (query) => {
       const d = query?.state?.data
-      if (d?.status === '03_Synthesizing') return 1500
+      if (d?.status === '04_Synthesizing') return 1500
       return false
     }
   })
@@ -149,7 +149,7 @@ function ProjectPipeline() {
         setCurrentStep(1)
       } else if (s === '02_Segmentation') {
         setCurrentStep(2)
-      } else if (s === '03_Phonetics' || s === '03_Synthesizing') {
+      } else if (s === '03_Phonetics' || s === '04_Synthesizing') {
         setCurrentStep(3)
       } else if (s === '04_Audio_Review') {
         setCurrentStep(4)
@@ -226,7 +226,7 @@ function ProjectPipeline() {
         if (localPhonetics.length > 0) await savePhoneticsMutation.mutateAsync(localPhonetics)
       }
 
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/stage/${stageNum}`, {
+      const res = await fetch(`http://localhost:8000/api/projects/${project}/stage/${stageNum + 1}`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
@@ -241,7 +241,9 @@ function ProjectPipeline() {
       if (variables === 0) setCurrentStep(1)
       if (variables === 1) setCurrentStep(2)
       if (variables === 2) setCurrentStep(3)
-      if (variables === 3) setCurrentStep(4)
+      if (variables === 3) {
+        queryClient.setQueryData(['projectDetails', project], previous => ({ ...previous, status: data.new_status }))
+      }
       if (variables === 4) setCurrentStep(5)
 
       queryClient.invalidateQueries({ queryKey: ['projectDetails', project] })
@@ -350,6 +352,15 @@ function ProjectPipeline() {
 
         {/* Center/Right Content Area */}
         <main className="flex-1 p-4 md:p-6 overflow-hidden flex flex-col relative bg-slate-100/60">
+          {projectDetails?.audio_progress?.failed?.length > 0 && (
+            <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+              <p className="font-semibold">Some narration could not be generated. Retry Audio to resume completed chunks.</p>
+              {projectDetails.audio_progress.failed.map(chunk => (
+                <p key={chunk.id}>{chunk.id}: {chunk.error}</p>
+              ))}
+            </div>
+          )}
+
           {isLoading && (
             <div className="absolute inset-0 bg-white/70 backdrop-blur-xs flex flex-col items-center justify-center z-30">
               <ArrowPathIcon className="w-8 h-8 text-blue-600 animate-spin mb-3" />
@@ -372,7 +383,7 @@ function ProjectPipeline() {
           {/* ========================================================================= */}
           {/* BACKGROUND SPEECH SYNTHESIS PROGRESS BANNER */}
           {/* ========================================================================= */}
-          {projectDetails?.status === '03_Synthesizing' && (
+          {projectDetails?.status === '04_Synthesizing' && (
             <div className="mb-4 p-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-700 text-white shadow-md flex flex-col gap-3 shrink-0 animate-in fade-in">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div className="flex items-center gap-3">
@@ -382,7 +393,7 @@ function ProjectPipeline() {
                   <div>
                     <h3 className="text-xs sm:text-sm font-bold">Neural Speech Synthesis in Progress</h3>
                     <p className="text-[11px] text-blue-100">
-                      Generating high-fidelity 24kHz studio audio with Edge-TTS Devanagari model...
+                      Generating narration with the selected voice...
                     </p>
                   </div>
                 </div>
@@ -579,7 +590,7 @@ function ProjectPipeline() {
                 <div className="space-y-3">
                   <button 
                     onClick={() => runStageMutation.mutate(0)} 
-                    disabled={runStageMutation.isPending} 
+                    disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending} 
                     className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2.5 rounded-lg text-xs transition flex items-center justify-center gap-2 shadow-xs cursor-pointer disabled:opacity-50"
                   >
                     {runStageMutation.isPending && <ArrowPathIcon className="w-4 h-4 animate-spin"/>}
@@ -633,7 +644,7 @@ function ProjectPipeline() {
                     )}
                     <button 
                       onClick={() => runStageMutation.mutate(0)} 
-                      disabled={runStageMutation.isPending}
+                      disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending}
                       title="Re-run Gemini OCR on the source PDF"
                       className="px-2.5 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-md text-xs font-medium shadow-xs transition cursor-pointer flex items-center gap-1 disabled:opacity-50"
                     >
@@ -642,7 +653,7 @@ function ProjectPipeline() {
                     </button>
                     <button 
                       onClick={() => saveCleanMutation.mutate(localCleanText)} 
-                      disabled={saveCleanMutation.isPending}
+                      disabled={projectDetails?.status === '04_Synthesizing' || saveCleanMutation.isPending}
                       className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-md text-xs font-semibold shadow-xs transition cursor-pointer flex items-center gap-1.5"
                     >
                       {saveCleanMutation.isPending && <ArrowPathIcon className="w-3.5 h-3.5 animate-spin"/>}
@@ -650,7 +661,7 @@ function ProjectPipeline() {
                     </button>
                     <button 
                       onClick={() => runStageMutation.mutate(1)} 
-                      disabled={runStageMutation.isPending}
+                      disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending}
                       className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs font-semibold shadow-xs transition cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                     >
                       {runStageMutation.isPending && <ArrowPathIcon className="w-3.5 h-3.5 animate-spin"/>}
@@ -679,7 +690,7 @@ function ProjectPipeline() {
                   <h2 className="text-xs font-bold uppercase text-slate-700">Cleaned Text Reference</h2>
                   <button 
                     onClick={() => saveCleanMutation.mutate(localCleanText)} 
-                    disabled={saveCleanMutation.isPending}
+                    disabled={projectDetails?.status === '04_Synthesizing' || saveCleanMutation.isPending}
                     className="px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded text-xs font-medium cursor-pointer"
                   >
                     {saveCleanMutation.isPending ? 'Saving...' : 'Save Cleaned'}
@@ -702,7 +713,7 @@ function ProjectPipeline() {
                   <div className="flex items-center gap-2">
                     <button 
                       onClick={() => saveSegmentsMutation.mutate(activeSegments)} 
-                      disabled={saveSegmentsMutation.isPending || activeSegments.length === 0}
+                      disabled={projectDetails?.status === '04_Synthesizing' || saveSegmentsMutation.isPending || activeSegments.length === 0}
                       className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-md text-xs font-semibold cursor-pointer flex items-center gap-1.5"
                     >
                       {saveSegmentsMutation.isPending && <ArrowPathIcon className="w-3.5 h-3.5 animate-spin"/>}
@@ -710,7 +721,7 @@ function ProjectPipeline() {
                     </button>
                     <button 
                       onClick={() => runStageMutation.mutate(2)} 
-                      disabled={runStageMutation.isPending || activeSegments.length === 0}
+                      disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending || activeSegments.length === 0}
                       className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs font-semibold cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                     >
                       {runStageMutation.isPending && <ArrowPathIcon className="w-3.5 h-3.5 animate-spin"/>}
@@ -724,7 +735,7 @@ function ProjectPipeline() {
                     <p className="text-sm font-medium mb-3">No segments created yet.</p>
                     <button 
                       onClick={() => runStageMutation.mutate(1)} 
-                      disabled={runStageMutation.isPending}
+                      disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending}
                       className="bg-blue-600 text-white px-4 py-2 rounded-lg text-xs font-semibold hover:bg-blue-700 transition"
                     >
                       {runStageMutation.isPending ? 'Running...' : 'Run Segmentation on Cleaned Text'}
@@ -825,7 +836,7 @@ function ProjectPipeline() {
                   <div className="flex items-center gap-2">
                     <button 
                       onClick={() => savePhoneticsMutation.mutate(activePhonetics)} 
-                      disabled={savePhoneticsMutation.isPending || activePhonetics.length === 0}
+                      disabled={projectDetails?.status === '04_Synthesizing' || savePhoneticsMutation.isPending || activePhonetics.length === 0}
                       className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-md text-xs font-semibold cursor-pointer flex items-center gap-1.5"
                     >
                       {savePhoneticsMutation.isPending && <ArrowPathIcon className="w-3.5 h-3.5 animate-spin"/>}
@@ -833,7 +844,7 @@ function ProjectPipeline() {
                     </button>
                     <button 
                       onClick={() => runStageMutation.mutate(3)} 
-                      disabled={runStageMutation.isPending || activePhonetics.length === 0}
+                      disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending || activePhonetics.length === 0}
                       className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs font-semibold cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                     >
                       {runStageMutation.isPending && <ArrowPathIcon className="w-3.5 h-3.5 animate-spin"/>}
@@ -847,7 +858,7 @@ function ProjectPipeline() {
                     <p className="text-sm font-medium mb-3">No phonetics generated yet.</p>
                     <button 
                       onClick={() => runStageMutation.mutate(2)} 
-                      disabled={runStageMutation.isPending}
+                      disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending}
                       className="bg-blue-600 text-white px-4 py-2 rounded-lg text-xs font-semibold hover:bg-blue-700 transition"
                     >
                       Apply Pronunciation Rules to Segments
@@ -922,7 +933,7 @@ function ProjectPipeline() {
                 <div className="flex items-center gap-2">
                   <button 
                     onClick={() => runStageMutation.mutate(4)} 
-                    disabled={runStageMutation.isPending}
+                    disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending}
                     className="bg-green-600 hover:bg-green-700 text-white font-semibold px-4 py-2 rounded-lg text-xs transition cursor-pointer flex items-center gap-2 shadow-xs disabled:opacity-50"
                   >
                     <SpeakerWaveIcon className="w-4 h-4" />
@@ -931,7 +942,7 @@ function ProjectPipeline() {
                 </div>
               </div>
 
-              {projectDetails?.status === '03_Synthesizing' ? (
+              {projectDetails?.status === '04_Synthesizing' ? (
                 <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
                   <div className="w-16 h-16 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center mb-4 animate-pulse">
                     <SpeakerWaveIcon className="w-8 h-8" />
@@ -997,7 +1008,7 @@ function ProjectPipeline() {
               </div>
               <h2 className="text-xl font-bold text-slate-900 mb-1">Audiobook Production Complete!</h2>
               <p className="text-xs text-slate-500 max-w-md mb-6">
-                The final audiobook has been seamlessly concatenated, normalized, and mastered according to AWGP broadcast standards.
+                The final audiobook has been assembled and mastered. Listen through the result to verify pronunciation, pacing, and completeness before publishing.
               </p>
 
               {/* Mastered Audio Player */}

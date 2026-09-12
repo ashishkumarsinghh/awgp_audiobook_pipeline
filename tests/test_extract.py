@@ -1,46 +1,55 @@
-import pytest
 from unittest.mock import patch, MagicMock
+import fitz
+import pytest
 from src.extract.ocr_engine import extract_text_from_pdf
 
-def test_ocr_engine_mocked(tmp_path):
-    pdf_path = tmp_path / "dummy.pdf"
-    pdf_path.write_bytes(b"dummy pdf content")
-    
-    with patch("src.extract.ocr_engine.genai.Client") as MockClient:
-        # Set up the mock chain
-        mock_client = MagicMock()
-        MockClient.return_value = mock_client
-        
-        # Mock file upload
-        mock_file = MagicMock()
-        mock_file.name = "mock_file_name"
-        mock_client.files.upload.return_value = mock_file
-        
-        # Mock file state to ACTIVE
-        mock_file_state = MagicMock()
-        mock_file_state.state.name = "ACTIVE"
-        mock_client.files.get.return_value = mock_file_state
-        
-        # Mock generate_content
-        mock_response = MagicMock()
-        mock_response.text = "Mocked OCR Text"
-        mock_client.models.generate_content.return_value = mock_response
-        
-        # Provide dummy API key so it doesn't fail early
-        with patch.dict("os.environ", {"GEMINI_API_KEY": "fake_key"}):
-            # Test extract_text_from_pdf
-            # Need to mock the split_pdf function so it doesn't try to use pymupdf on dummy bytes
-            with patch("src.extract.ocr_engine.split_pdf") as mock_split:
-                # Return a list of fake pdf paths
-                fake_chunk = tmp_path / "chunk_1.pdf"
-                fake_chunk.write_bytes(b"chunk content")
-                mock_split.return_value = [str(fake_chunk)]
-                
-                text = extract_text_from_pdf(str(pdf_path))
-                assert "Mocked OCR Text" in text
 
-def test_gemini_processor_init():
-    with patch.dict("os.environ", {"GEMINI_API_KEY": "fake_key"}):
-        from src.extract.ocr_engine import get_gemini_client
-        client = get_gemini_client()
-        assert client is not None
+def pdf_file(tmp_path, texts):
+    path = tmp_path / "book.pdf"
+    with fitz.open() as doc:
+        for text in texts:
+            page = doc.new_page()
+            if text:
+                page.insert_text((72, 72), text)
+        doc.save(path)
+    return path
+
+
+def test_ocr_engine_mocked(tmp_path):
+    path = pdf_file(tmp_path, ["A page"])
+    client = MagicMock()
+    client.models.generate_content.return_value.text = "<prose>Transcription.</prose>"
+    with patch("src.extract.ocr_engine.get_gemini_client", return_value=client):
+        assert extract_text_from_pdf(str(path)) == "<prose>Transcription.</prose>"
+    assert client.models.generate_content.call_count == 1
+
+
+def test_invalid_pdf_is_not_sent_to_model(tmp_path):
+    path = tmp_path / "bad.pdf"
+    path.write_bytes(b"invalid")
+    with patch("src.extract.ocr_engine.get_gemini_client") as client:
+        with pytest.raises(ValueError, match="Cannot open PDF"):
+            extract_text_from_pdf(str(path))
+        client.assert_not_called()
+
+
+def test_local_page_limit_and_scanned_page_error(tmp_path):
+    path = pdf_file(tmp_path, ["Page one.", ""])
+    with patch("src.extract.ocr_engine.get_gemini_client", return_value=None):
+        assert extract_text_from_pdf(str(path), max_pages=1) == "Page one."
+        with pytest.raises(RuntimeError, match="Page 2.*GEMINI_API_KEY"):
+            extract_text_from_pdf(str(path))
+
+
+def test_empty_cloud_response_identifies_page(tmp_path):
+    path = pdf_file(tmp_path, ["A"])
+    client = MagicMock()
+    client.models.generate_content.return_value.text = ""
+    with patch("src.extract.ocr_engine.get_gemini_client", return_value=client):
+        with pytest.raises(RuntimeError, match="page 1.*empty OCR"):
+            extract_text_from_pdf(str(path))
+
+
+def test_invalid_page_limit(tmp_path):
+    with pytest.raises(ValueError, match="positive integer"):
+        extract_text_from_pdf(str(tmp_path / "book.pdf"), 0)
