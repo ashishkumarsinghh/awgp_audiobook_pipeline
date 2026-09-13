@@ -56,7 +56,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-PROJECTS_DIR = os.path.abspath("projects")
+PROJECTS_DIR = os.path.abspath(os.environ.get("PROJECTS_DIR", "projects"))
+os.makedirs(PROJECTS_DIR, exist_ok=True)
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "service": "awgp-audiobook-api"}
 
 def _book_slug(title: str, db: Session) -> str:
     normalized = unicodedata.normalize("NFKD", (title or "book").strip()).encode("ascii", "ignore").decode().lower()
