@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.sql import func
 from src.db.database import Base
 
@@ -47,3 +47,43 @@ class Artifact(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     username = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+class Candidate(Base):
+    """An immutable mastered output awaiting an editorial decision."""
+    __tablename__ = "candidates"
+    id = Column(Integer, primary_key=True, index=True)
+    project_name = Column(String, ForeignKey("projects.name"), index=True, nullable=False)
+    artifact_filename = Column(String, nullable=False)
+    sha256 = Column(String, nullable=False, index=True)
+    status = Column(String, default="pending_review", index=True)  # pending_review, approved, superseded
+    source_status = Column(String, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+class ReviewIssue(Base):
+    __tablename__ = "review_issues"
+    id = Column(Integer, primary_key=True, index=True)
+    project_name = Column(String, ForeignKey("projects.name"), index=True, nullable=False)
+    candidate_id = Column(Integer, ForeignKey("candidates.id"), index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    body = Column(Text, nullable=False)
+    severity = Column(String, default="major")  # blocker, major, minor
+    status = Column(String, default="open", index=True)  # open, resolved, dismissed, reopened
+    stage = Column(String, nullable=True)
+    page_number = Column(Integer, nullable=True)
+    start_seconds = Column(Integer, nullable=True)
+    end_seconds = Column(Integer, nullable=True)
+    segment_id = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+    resolved_at = Column(DateTime, nullable=True)
+    resolved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+class ReviewDecision(Base):
+    __tablename__ = "review_decisions"
+    id = Column(Integer, primary_key=True, index=True)
+    project_name = Column(String, ForeignKey("projects.name"), index=True, nullable=False)
+    candidate_id = Column(Integer, ForeignKey("candidates.id"), index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    decision = Column(String, nullable=False)  # approved, changes_requested, saved
+    summary = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)

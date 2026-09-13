@@ -20,12 +20,14 @@ from datetime import datetime, timedelta, timezone
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import shutil
+import hashlib
 import bcrypt
 from sqlalchemy.orm import Session
 
 from src.pipeline_v3 import ProjectManager
+from src.synthesis.providers import VOICE_CATALOG
 from src.db.database import engine, Base, get_db
-from src.db.models import User, AuditLog, Project, Artifact
+from src.db.models import User, AuditLog, Project, Artifact, Candidate, ReviewIssue, ReviewDecision
 
 # Init DB
 Base.metadata.create_all(bind=engine)
@@ -162,6 +164,13 @@ def save_artifact_record(
     db.commit()
     return artifact_filename
 
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
 
 class UserCreate(BaseModel):
     username: str
@@ -249,21 +258,46 @@ class TTSProviderRequest(BaseModel):
     provider: str
     voice: Optional[str] = None
 
+class ReviewIssueRequest(BaseModel):
+    body: str
+    severity: str = "major"
+    stage: Optional[str] = None
+    page_number: Optional[int] = None
+    start_seconds: Optional[int] = None
+    end_seconds: Optional[int] = None
+    segment_id: Optional[str] = None
+
+class ReviewDecisionRequest(BaseModel):
+    decision: str
+    summary: Optional[str] = None
+
+def _validate_tts_selection(provider: str, voice: Optional[str]) -> str:
+    provider = "google" if provider == "gemini" else provider
+    options = [v["voice"] for v in VOICE_CATALOG if v["provider"] == provider]
+    if voice and voice not in options:
+        raise HTTPException(422, detail="Voice is not in the curated Hindi/Sanskrit voice catalog")
+    return voice or ("hi-IN-Neural2-A" if provider == "google" else "hi-IN-SwaraNeural")
+
 @app.get("/api/settings/tts-provider")
 def get_tts_provider(current_user: User = Depends(get_current_user)):
     provider = os.environ.get('TTS_PROVIDER', 'edge')
     voice = os.environ.get('TTS_VOICE', 'hi-IN-SwaraNeural')
     return {"provider": provider, "voice": voice}
 
+@app.get("/api/tts/voices")
+def get_tts_voices(current_user: User = Depends(get_current_user)):
+    return {"voices": VOICE_CATALOG}
+
 
 @app.post("/api/settings/tts-provider")
 def set_tts_provider(req: TTSProviderRequest, current_user: User = Depends(get_current_user)):
-    if req.provider not in ['edge', 'gemini']:
-        raise HTTPException(status_code=400, detail="Provider must be 'edge' or 'gemini'")
-    os.environ['TTS_PROVIDER'] = req.provider
+    if req.provider not in ['edge', 'google', 'azure', 'gemini']:
+        raise HTTPException(status_code=400, detail="Provider must be 'edge', 'google' or 'azure'")
+    req.voice = _validate_tts_selection(req.provider, req.voice)
+    os.environ['TTS_PROVIDER'] = "google" if req.provider == "gemini" else req.provider
     if req.voice:
         os.environ['TTS_VOICE'] = req.voice
-    return {"status": "success", "provider": req.provider, "voice": req.voice or os.environ.get('TTS_VOICE')}
+    return {"status": "success", "provider": os.environ['TTS_PROVIDER'], "voice": os.environ.get('TTS_VOICE')}
 
 
 @app.post("/api/users/request-allocation")
@@ -667,7 +701,19 @@ def run_stage(project_name: str, stage: int, background_tasks: BackgroundTasks, 
             return "04_Audio_Review"
         elif stage == 5:
             pm.run_stage_4_mastering()
-            save_artifact_record(db, project_name, "05_mastered", "mp3", pm.master_file, current_user.username, current_user.id)
+            artifact_name = save_artifact_record(db, project_name, "05_mastered", "mp3", pm.master_file, current_user.username, current_user.id)
+            digest = _sha256_file(pm.master_file)
+            existing = db.query(Candidate).filter(Candidate.project_name == project_name,
+                                                   Candidate.sha256 == digest).first()
+            if existing:
+                existing.artifact_filename = artifact_name or existing.artifact_filename
+            else:
+                db.query(Candidate).filter(Candidate.project_name == project_name,
+                                           Candidate.status == "pending_review").update({"status": "superseded"})
+                db.add(Candidate(project_name=project_name,
+                                 artifact_filename=artifact_name or os.path.basename(pm.master_file),
+                                 sha256=digest, status="pending_review",
+                                 source_status="05_Mastered", created_by=current_user.id))
             return "05_Mastered"
 
     lock = project_lock(project_name)
@@ -795,10 +841,130 @@ def download_artifact(project_name: str, filename: str, token: Optional[str] = Q
     elif safe_name.endswith(".pdf"): media_type = "application/pdf"
     return FileResponse(file_path, media_type=media_type, filename=safe_name)
 
+@app.post("/api/projects/{project_name}/artifacts/{filename}/restore")
+def restore_artifact(project_name: str, filename: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Restore an immutable historical text/JSON artifact as the active draft."""
+    record = db.query(Artifact).filter(Artifact.project_name == project_name, Artifact.filename == os.path.basename(filename)).first()
+    if not record or record.file_type not in ("txt", "json"):
+        raise HTTPException(404, detail="Only text and JSON artifacts can be restored")
+    source = os.path.abspath(os.path.join(PROJECTS_DIR, project_name, "artifacts", record.filename))
+    if not os.path.isfile(source):
+        raise HTTPException(404, detail="Artifact file not found")
+    target_name = {"00_ocr_raw": "01_ocr_raw.txt", "01_text_cleaned": "02_text_cleaned.txt",
+                   "02_segments": "03_segments.json", "03_phonetics": "04_phonetics.json"}.get(record.stage)
+    if not target_name:
+        raise HTTPException(422, detail="This artifact stage cannot be restored")
+    target = os.path.join(PROJECTS_DIR, project_name, target_name)
+    shutil.copyfile(source, target)
+    pm = ProjectManager(os.path.join(PROJECTS_DIR, project_name))
+    pm.invalidate_after({"00_ocr_raw": "raw", "01_text_cleaned": "clean", "02_segments": "segments", "03_phonetics": "phonetics"}[record.stage])
+    db.add(AuditLog(project_name=project_name, stage=record.stage, action="RESTORED ARTIFACT AS DRAFT",
+                    details=record.filename, user_id=current_user.id))
+    db.commit()
+    return {"status": "success", "restored": target_name, "source_artifact": record.filename}
+
 @app.get("/api/projects/{project_name}/audit")
 def get_audit_logs(project_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     logs = db.query(AuditLog).filter(AuditLog.project_name == project_name).order_by(AuditLog.timestamp.desc()).all()
     return [{"id": l.id, "stage": l.stage, "action": l.action, "timestamp": l.timestamp.isoformat() if l.timestamp else None, "user_id": l.user_id, "details": l.details} for l in logs]
+
+def _candidate_payload(candidate, db):
+    issues = db.query(ReviewIssue).filter(ReviewIssue.candidate_id == candidate.id).order_by(ReviewIssue.created_at.asc()).all()
+    decisions = db.query(ReviewDecision).filter(ReviewDecision.candidate_id == candidate.id).order_by(ReviewDecision.created_at.desc()).all()
+    return {
+        "id": candidate.id, "project_name": candidate.project_name,
+        "artifact_filename": candidate.artifact_filename, "sha256": candidate.sha256,
+        "status": candidate.status, "created_at": candidate.created_at.isoformat() if candidate.created_at else None,
+        "audio_url": f"/api/projects/{candidate.project_name}/review/audio",
+        "issues": [{"id": i.id, "body": i.body, "severity": i.severity, "status": i.status,
+                    "stage": i.stage, "page_number": i.page_number, "start_seconds": i.start_seconds,
+                    "end_seconds": i.end_seconds, "segment_id": i.segment_id,
+                    "created_at": i.created_at.isoformat() if i.created_at else None} for i in issues],
+        "decisions": [{"id": d.id, "decision": d.decision, "summary": d.summary,
+                       "user_id": d.user_id, "created_at": d.created_at.isoformat() if d.created_at else None} for d in decisions],
+        "open_blockers": sum(1 for i in issues if i.status in ("open", "reopened") and i.severity == "blocker")
+    }
+
+@app.get("/api/projects/{project_name}/review")
+def get_review(project_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    candidate = db.query(Candidate).filter(Candidate.project_name == project_name,
+                                           Candidate.status != "superseded").order_by(Candidate.created_at.desc()).first()
+    if not candidate:
+        raise HTTPException(404, detail="No review candidate exists. Run Mastering first.")
+    return _candidate_payload(candidate, db)
+
+@app.get("/api/projects/{project_name}/review/audio")
+def get_review_audio(project_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    candidate = db.query(Candidate).filter(Candidate.project_name == project_name,
+                                           Candidate.status != "superseded").order_by(Candidate.created_at.desc()).first()
+    if not candidate:
+        raise HTTPException(404, detail="No review candidate exists")
+    file_path = os.path.abspath(os.path.join(PROJECTS_DIR, project_name, "artifacts", candidate.artifact_filename))
+    if not os.path.isfile(file_path):
+        raise HTTPException(409, detail="Candidate artifact is missing; restore it before reviewing")
+    if _sha256_file(file_path) != candidate.sha256:
+        raise HTTPException(409, detail="Candidate artifact integrity check failed")
+    return FileResponse(file_path, media_type="audio/mpeg")
+
+@app.post("/api/projects/{project_name}/review/issues")
+def create_review_issue(project_name: str, payload: ReviewIssueRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if payload.severity not in ("blocker", "major", "minor"):
+        raise HTTPException(422, detail="Severity must be blocker, major or minor")
+    if not payload.body.strip():
+        raise HTTPException(422, detail="Comment cannot be empty")
+    candidate = db.query(Candidate).filter(Candidate.project_name == project_name,
+                                           Candidate.status == "pending_review").order_by(Candidate.created_at.desc()).first()
+    if not candidate:
+        raise HTTPException(409, detail="No pending review candidate")
+    issue = ReviewIssue(project_name=project_name, candidate_id=candidate.id, user_id=current_user.id,
+                        body=payload.body.strip(), severity=payload.severity, stage=payload.stage,
+                        page_number=payload.page_number, start_seconds=payload.start_seconds,
+                        end_seconds=payload.end_seconds, segment_id=payload.segment_id)
+    db.add(issue)
+    db.add(AuditLog(project_name=project_name, stage="06_Final_Review", action="REVIEW ISSUE CREATED",
+                    details=payload.body.strip(), user_id=current_user.id))
+    db.commit()
+    return {"status": "success", "issue_id": issue.id}
+
+@app.patch("/api/projects/{project_name}/review/issues/{issue_id}")
+def update_review_issue(project_name: str, issue_id: int, status: str = Form(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if status not in ("open", "resolved", "dismissed", "reopened"):
+        raise HTTPException(422, detail="Invalid issue status")
+    issue = db.query(ReviewIssue).filter(ReviewIssue.id == issue_id, ReviewIssue.project_name == project_name).first()
+    if not issue:
+        raise HTTPException(404, detail="Review issue not found")
+    issue.status = status
+    if status in ("resolved", "dismissed"):
+        issue.resolved_by, issue.resolved_at = current_user.id, datetime.now(timezone.utc)
+    else:
+        issue.resolved_by, issue.resolved_at = None, None
+    db.commit()
+    return {"status": "success", "issue_status": issue.status}
+
+@app.post("/api/projects/{project_name}/review/decision")
+def submit_review_decision(project_name: str, payload: ReviewDecisionRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if payload.decision not in ("approved", "changes_requested", "saved"):
+        raise HTTPException(422, detail="Decision must be approved, changes_requested or saved")
+    candidate = db.query(Candidate).filter(Candidate.project_name == project_name,
+                                           Candidate.status == "pending_review").order_by(Candidate.created_at.desc()).first()
+    if not candidate:
+        raise HTTPException(409, detail="No pending review candidate")
+    blockers = db.query(ReviewIssue).filter(ReviewIssue.candidate_id == candidate.id,
+                                            ReviewIssue.severity == "blocker",
+                                            ReviewIssue.status.in_(["open", "reopened"])).count()
+    if payload.decision == "approved" and blockers:
+        raise HTTPException(409, detail=f"Resolve {blockers} blocking review issue(s) before approval")
+    db.add(ReviewDecision(project_name=project_name, candidate_id=candidate.id, user_id=current_user.id,
+                          decision=payload.decision, summary=payload.summary))
+    if payload.decision == "approved":
+        candidate.status = "approved"
+        db.query(Project).filter(Project.name == project_name).update({"status": "06_Approved"})
+    elif payload.decision == "changes_requested":
+        db.query(Project).filter(Project.name == project_name).update({"status": "06_Changes_Requested"})
+    db.add(AuditLog(project_name=project_name, stage="06_Final_Review", action=f"REVIEW {payload.decision.upper()}",
+                    details=payload.summary, user_id=current_user.id))
+    db.commit()
+    return {"status": "success", "decision": payload.decision, "candidate_id": candidate.id}
 
 
 @app.get("/api/projects/{project_name}/settings/tts-provider")
@@ -814,10 +980,11 @@ def set_project_tts_provider(project_name: str, req: TTSProviderRequest, db: Ses
     proj = db.query(Project).filter(Project.name == project_name).first()
     if not proj:
         raise HTTPException(status_code=404, detail="Project not found")
-    if req.provider not in ['edge', 'gemini']:
-        raise HTTPException(status_code=400, detail="Provider must be 'edge' or 'gemini'")
-    proj.tts_provider = req.provider
-    proj.tts_voice = req.voice or ("hi-IN-Wavenet-A" if req.provider == "gemini" else "hi-IN-SwaraNeural")
+    if req.provider not in ['edge', 'google', 'azure', 'gemini']:
+        raise HTTPException(status_code=400, detail="Provider must be 'edge', 'google' or 'azure'")
+    normalized_provider = "google" if req.provider == "gemini" else req.provider
+    proj.tts_provider = normalized_provider
+    proj.tts_voice = _validate_tts_selection(normalized_provider, req.voice)
     ProjectManager(os.path.join(PROJECTS_DIR, project_name)).invalidate_after("phonetics")
     db.commit()
     return {"status": "success", "provider": proj.tts_provider, "voice": proj.tts_voice}
@@ -829,6 +996,12 @@ def get_dictionary():
         with open(dict_path, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
+
+@app.get("/api/dictionary/explain")
+def explain_pronunciation(text: str = Query(..., min_length=1), context: str = Query("general")):
+    """Return the reversible pronunciation transformation used for a preview."""
+    from src.normalize.pronunciation import PronunciationDictionary
+    return PronunciationDictionary().explain(text, context=context)
 
 if __name__ == "__main__":
     import uvicorn

@@ -3,6 +3,7 @@ import re
 import asyncio
 import edge_tts
 import tempfile
+import html
 from pathlib import Path
 from src.synthesis.audio.io import run_ffmpeg
 from typing import List, Optional
@@ -133,5 +134,69 @@ class GeminiTTSProvider(TTSProvider):
         except Exception as e:
             raise RuntimeError(f"Google Cloud TTS failed: {e}") from e
 
+class GoogleCloudTTSProvider(GeminiTTSProvider):
+    """Preferred name for the Google Cloud Text-to-Speech adapter.
+
+    GeminiTTSProvider remains as a compatibility alias for existing projects.
+    """
+
+
 class AzureSpeechProvider(TTSProvider):
-    pass
+    """Azure Speech SDK adapter producing the pipeline's canonical WAV format."""
+    def __init__(self, voice: str = "hi-IN-SwaraNeural"):
+        self.voice = voice
+        self._sdk = None
+
+    def _speech_config(self):
+        try:
+            import azure.cognitiveservices.speech as speechsdk
+        except ImportError as exc:
+            raise RuntimeError("Azure Speech is unavailable. Install azure-cognitiveservices-speech.") from exc
+        key, region = os.environ.get("AZURE_SPEECH_KEY"), os.environ.get("AZURE_SPEECH_REGION")
+        if not key or not region:
+            raise RuntimeError("Azure Speech requires AZURE_SPEECH_KEY and AZURE_SPEECH_REGION.")
+        config = speechsdk.SpeechConfig(subscription=key, region=region)
+        config.speech_synthesis_voice_name = self.voice
+        config.set_speech_synthesis_output_format(
+            speechsdk.SpeechSynthesisOutputFormat.Riff24Khz16BitMonoPcm
+        )
+        return speechsdk, config
+
+    async def synthesize(self, segment: SpeechSegment, output_path: str) -> str:
+        text = segment.pronunciation_text or segment.normalized_text or segment.source_text
+        text = re.sub(r"<[^>]+>", "", text or "").strip()
+        if not text:
+            raise ValueError("Cannot synthesize empty narration.")
+        if not str(output_path).lower().endswith(".wav"):
+            raise ValueError("Azure Speech output must be .wav.")
+        speechsdk, config = self._speech_config()
+        escaped = html.escape(text)
+        ssml = (f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+                f'xml:lang="hi-IN"><voice name="{html.escape(self.voice)}">'
+                f'<prosody rate="{segment.rate or "+0%"}" pitch="{segment.pitch or "+0Hz"}" '
+                f'volume="{segment.volume or "+0%"}">{escaped}</prosody></voice></speak>')
+        output = str(output_path)
+
+        def run():
+            audio = speechsdk.audio.AudioOutputConfig(filename=output)
+            synthesizer = speechsdk.SpeechSynthesizer(speech_config=config, audio_config=audio)
+            result = synthesizer.speak_ssml_async(ssml).get()
+            if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
+                details = getattr(result, "cancellation_details", None)
+                raise RuntimeError(f"Azure Speech failed: {details or result.reason}")
+
+        await asyncio.to_thread(run)
+        if not Path(output).is_file() or not Path(output).stat().st_size:
+            raise RuntimeError("Azure Speech returned no audio.")
+        segment.audio_file = output
+        return output
+
+
+VOICE_CATALOG = [
+    {"provider": "edge", "voice": "hi-IN-SwaraNeural", "label": "Swara (Hindi, female)", "tier": "recommended", "sanskrit": True},
+    {"provider": "edge", "voice": "hi-IN-MadhurNeural", "label": "Madhur (Hindi, male)", "tier": "recommended", "sanskrit": True},
+    {"provider": "google", "voice": "hi-IN-Neural2-A", "label": "Neural2 A (Hindi, female)", "tier": "recommended", "sanskrit": True},
+    {"provider": "google", "voice": "hi-IN-Neural2-B", "label": "Neural2 B (Hindi, male)", "tier": "recommended", "sanskrit": True},
+    {"provider": "azure", "voice": "hi-IN-SwaraNeural", "label": "Swara (Hindi, female)", "tier": "recommended", "sanskrit": True},
+    {"provider": "azure", "voice": "hi-IN-MadhurNeural", "label": "Madhur (Hindi, male)", "tier": "recommended", "sanskrit": True},
+]

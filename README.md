@@ -35,10 +35,12 @@ Set these variables in a local .env (do not commit credentials):
 | OCR_MODEL | Overrides the existing default gemini-3.6-flash. Confirm model availability for your account. |
 | TTS_PROVIDER | edge by default; gemini is the legacy name for the Google Cloud TTS adapter. |
 | TTS_VOICE | Optional provider-compatible voice; project settings take precedence in the API. |
+| AZURE_SPEECH_KEY | Azure Speech subscription key (required only for Azure projects). |
+| AZURE_SPEECH_REGION | Azure Speech region, for example `centralindia` (required only for Azure projects). |
 | JWT_SECRET_KEY | Set a private random signing secret before sharing access to the API. |
 | DATABASE_URL | Defaults to sqlite:///./audiobook_pipeline.db; tests use isolated in-memory databases. |
 
-Edge requires network access. The legacy gemini TTS option requires the optional google-cloud-texttospeech package and Google Application Default Credentials; GEMINI_API_KEY alone does not configure that adapter. Failures are explicit. The adapter no longer silently substitutes another provider or narrator.
+Edge requires network access. Google Cloud TTS requires the optional google-cloud-texttospeech package and Application Default Credentials; `GEMINI_API_KEY` alone does not configure it. Azure requires the Azure Speech SDK and `AZURE_SPEECH_KEY`/`AZURE_SPEECH_REGION`. The editor exposes a curated catalog of high-quality Hindi voices for Edge, Google and Azure; Sanskrit uses the selected Hindi voice with the project pronunciation profile. Failures are explicit and providers are never silently substituted.
 
 ## Review and produce a book
 

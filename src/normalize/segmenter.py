@@ -17,7 +17,7 @@ class SemanticSegmenter:
             r"(?<=[।॥!?])\s+|(?<=\.)\s+(?=\D)", text.strip()) if part.strip()]
 
     def _clean_tags(self, text):
-        text = re.sub(r"</?(?:heading|subheading|prose|gloss|shloka)>", "", text)
+        text = re.sub(rf"</?(?:{XMLParser.TAGS})>", "", text)
         return re.sub(r"\s+", " ", text).strip()
 
     def _pieces(self, sentence):
@@ -41,7 +41,14 @@ class SemanticSegmenter:
                 if not clean:
                     continue
                 tag = block.tag.value
-                pause = {"heading": 1000, "subheading": 600, "shloka": 800, "gloss": 500}.get(tag, 500)
+                # Ordinary prose relies on provider punctuation pauses. Explicit
+                # silence is reserved for semantic boundaries where it improves
+                # comprehension; editors can override it in Stage 2.
+                pause = {
+                    "heading": 1000, "subheading": 600, "book_title": 1400,
+                    "shloka": 800, "stanza": 800, "mantra": 800,
+                    "chant_refrain": 700, "gloss": 350,
+                }.get(tag, 0)
                 current = []
                 for sentence in self._split_into_sentences(clean):
                     for piece in self._pieces(sentence):

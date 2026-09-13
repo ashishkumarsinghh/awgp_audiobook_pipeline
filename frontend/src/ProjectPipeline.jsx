@@ -1,4 +1,4 @@
-import { useState, useEffect, useContext } from 'react'
+import { useState, useEffect, useContext, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AuthContext } from './AuthContext'
@@ -21,7 +21,14 @@ const steps = [
   { id: 2, name: 'Segmentation', desc: '03_segments.json' },
   { id: 3, name: 'Phonetic Scripting', desc: '04_phonetics.json' },
   { id: 4, name: 'Audio Review', desc: '05_audio_chunks/' },
-  { id: 5, name: 'Mastered Final', desc: '06_mastered.mp3' },
+  { id: 5, name: 'Final Review & Release', desc: '06_mastered.mp3' },
+]
+
+const segmentTypes = [
+  ['prose', 'Prose'], ['paragraph', 'Paragraph'], ['heading', 'Heading'], ['subheading', 'Subheading'],
+  ['shloka', 'Shloka'], ['verse_line', 'Verse line'], ['stanza', 'Stanza'], ['mantra', 'Mantra'],
+  ['chant_refrain', 'Chant refrain'], ['quote', 'Quote'], ['dialogue', 'Dialogue'], ['gloss', 'Gloss'],
+  ['footnote', 'Footnote'], ['list_item', 'List item'], ['caption', 'Caption'], ['transliteration', 'Transliteration'],
 ]
 
 function ProjectPipeline() {
@@ -36,6 +43,26 @@ function ProjectPipeline() {
   const [statusInitialized, setStatusInitialized] = useState(false)
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
   const [showArtifactsModal, setShowArtifactsModal] = useState(false)
+  const [reviewComment, setReviewComment] = useState('')
+  const [reviewSeverity, setReviewSeverity] = useState('major')
+  const [ttsProvider, setTtsProvider] = useState('edge')
+  const [ttsVoice, setTtsVoice] = useState('hi-IN-SwaraNeural')
+  const finalAudioRef = useRef(null)
+  const [reviewTimestamp, setReviewTimestamp] = useState(0)
+  const restoreArtifactMutation = useMutation({
+    mutationFn: async (filename) => {
+      const res = await fetch(`http://localhost:8000/api/projects/${project}/artifacts/${encodeURIComponent(filename)}/restore`, {
+        method: 'POST', headers: { 'Authorization': `Bearer ${user.token}` }
+      })
+      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Could not restore artifact') }
+      return res.json()
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['rawText', project] }); queryClient.invalidateQueries({ queryKey: ['segments', project] });
+      queryClient.invalidateQueries({ queryKey: ['phonetics', project] }); queryClient.invalidateQueries({ queryKey: ['projectDetails', project] });
+      refetchArtifacts();
+    }
+  })
 
   // 1. Fetch Project Metadata & Status (polls every 1.5s while audio is synthesizing)
   const { data: projectDetails, isLoading: loadingDetails, isError: errorDetails } = useQuery({
@@ -52,6 +79,30 @@ function ProjectPipeline() {
       if (d?.status === '04_Synthesizing') return 1500
       return false
     }
+  })
+
+  const { data: voiceCatalog = { voices: [] } } = useQuery({
+    queryKey: ['ttsVoices'], queryFn: async () => {
+      const res = await fetch('http://localhost:8000/api/tts/voices', { headers: { 'Authorization': `Bearer ${user.token}` } })
+      if (!res.ok) throw new Error('Failed to load voices')
+      return res.json()
+    }
+  })
+  const { data: ttsSettings } = useQuery({
+    queryKey: ['ttsSettings', project], queryFn: async () => {
+      const res = await fetch(`http://localhost:8000/api/projects/${project}/settings/tts-provider`, { headers: { 'Authorization': `Bearer ${user.token}` } })
+      if (!res.ok) throw new Error('Failed to load voice settings')
+      return res.json()
+    }
+  })
+  useEffect(() => { if (ttsSettings) { setTtsProvider(ttsSettings.provider); setTtsVoice(ttsSettings.voice) } }, [ttsSettings])
+  const saveTtsSettingsMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`http://localhost:8000/api/projects/${project}/settings/tts-provider`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` }, body: JSON.stringify({ provider: ttsProvider, voice: ttsVoice }) })
+      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Could not save voice settings') }
+      return res.json()
+    },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['projectDetails', project] }); queryClient.invalidateQueries({ queryKey: ['ttsSettings', project] }) }
   })
 
   // 2. Fetch Raw and Cleaned Text
@@ -92,6 +143,55 @@ function ProjectPipeline() {
       if (!res.ok) return []
       return res.json()
     }
+  })
+
+  const { data: reviewData, refetch: refetchReview } = useQuery({
+    queryKey: ['review', project],
+    queryFn: async () => {
+      const res = await fetch(`http://localhost:8000/api/projects/${project}/review`, {
+        headers: { 'Authorization': `Bearer ${user.token}` }
+      })
+      if (res.status === 404) return null
+      if (!res.ok) throw new Error('Failed to load review candidate')
+      return res.json()
+    },
+    enabled: Boolean(projectDetails?.has_mastered || projectDetails?.status === '05_Mastered' || projectDetails?.status === '06_Approved')
+  })
+
+  const reviewIssueMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch(`http://localhost:8000/api/projects/${project}/review/issues`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
+        body: JSON.stringify({ body: reviewComment, severity: reviewSeverity, start_seconds: Math.floor(reviewTimestamp) })
+      })
+      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Could not save review issue') }
+      return res.json()
+    },
+    onSuccess: () => { setReviewComment(''); refetchReview(); queryClient.invalidateQueries({ queryKey: ['projectDetails', project] }) }
+  })
+
+  const reviewDecisionMutation = useMutation({
+    mutationFn: async (decision) => {
+      const res = await fetch(`http://localhost:8000/api/projects/${project}/review/decision`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
+        body: JSON.stringify({ decision })
+      })
+      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Could not save review decision') }
+      return res.json()
+    },
+    onSuccess: () => { refetchReview(); queryClient.invalidateQueries({ queryKey: ['projectDetails', project] }) }
+  })
+
+  const reviewIssueStatusMutation = useMutation({
+    mutationFn: async ({ id, status }) => {
+      const body = new URLSearchParams({ status })
+      const res = await fetch(`http://localhost:8000/api/projects/${project}/review/issues/${id}`, {
+        method: 'PATCH', headers: { 'Authorization': `Bearer ${user.token}` }, body
+      })
+      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Could not update issue') }
+      return res.json()
+    },
+    onSuccess: () => { refetchReview(); queryClient.invalidateQueries({ queryKey: ['projectDetails', project] }) }
   })
 
   const { data: phoneticsData = [], isLoading: loadingPhonetics } = useQuery({
@@ -153,7 +253,7 @@ function ProjectPipeline() {
         setCurrentStep(3)
       } else if (s === '04_Audio_Review') {
         setCurrentStep(4)
-      } else if (s === '05_Mastered') {
+      } else if (s === '05_Mastered' || s === '06_Approved' || s === '06_Changes_Requested') {
         setCurrentStep(5)
       }
       setStatusInitialized(true)
@@ -299,6 +399,15 @@ function ProjectPipeline() {
 
         {/* Action button in header if applicable */}
         <div className="flex items-center gap-3">
+          <div className="hidden xl:flex items-center gap-1.5 text-xs" title="Choose one of the curated Hindi/Sanskrit voices. Changing voice invalidates matching audio chunks.">
+            <select value={ttsProvider} onChange={(e) => { setTtsProvider(e.target.value); const first = voiceCatalog.voices.find(v => v.provider === e.target.value); if (first) setTtsVoice(first.voice) }} className="border border-slate-200 rounded-md px-1.5 py-1 bg-white">
+              <option value="edge">Edge</option><option value="google">Google Cloud</option><option value="azure">Azure</option>
+            </select>
+            <select value={ttsVoice} onChange={(e) => setTtsVoice(e.target.value)} className="border border-slate-200 rounded-md px-1.5 py-1 bg-white max-w-40">
+              {voiceCatalog.voices.filter(v => v.provider === ttsProvider).map(v => <option key={v.voice} value={v.voice}>{v.label}</option>)}
+            </select>
+            <button onClick={() => saveTtsSettingsMutation.mutate()} disabled={saveTtsSettingsMutation.isPending} className="px-2 py-1 rounded-md bg-slate-800 text-white font-semibold disabled:opacity-50">Save voice</button>
+          </div>
           <button
             onClick={() => { refetchArtifacts(); setShowArtifactsModal(true); }}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
@@ -768,11 +877,7 @@ function ProjectPipeline() {
                                   onChange={(e) => updateSeg('segment_type', e.target.value)}
                                   className="w-full text-xs border border-slate-200 rounded px-1.5 py-1 bg-slate-50 focus:bg-white"
                                 >
-                                  <option value="prose">Prose</option>
-                                  <option value="shloka">Shloka</option>
-                                  <option value="heading">Heading</option>
-                                  <option value="quote">Quote</option>
-                                  <option value="mantra">Mantra</option>
+                                  {segmentTypes.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
                                 </select>
                               </td>
                               <td className="px-3 py-2 align-top">
@@ -789,7 +894,9 @@ function ProjectPipeline() {
                                   value={seg.pause_after_ms !== undefined ? seg.pause_after_ms : 300} 
                                   onChange={(e) => updateSeg('pause_after_ms', parseInt(e.target.value) || 0)}
                                   className="w-full text-xs border border-slate-200 rounded p-1"
+                                  title="Silence after this segment. Ordinary prose uses automatic punctuation pauses; use longer values for verses, stanzas and headings."
                                 />
+                                <span className="block text-[9px] text-slate-400 mt-1">0 = automatic · 300–500 ms = sentence · 800+ ms = stanza/heading</span>
                               </td>
                             </tr>
                           )
@@ -899,6 +1006,7 @@ function ProjectPipeline() {
                                   value={item.rate || '+0%'} 
                                   onChange={(e) => updatePhon('rate', e.target.value)}
                                   className="w-full text-xs border border-slate-200 rounded p-1 font-mono"
+                                  title="Relative speaking rate. -10% is slower and clearer but increases duration; +10% is faster and may reduce intelligibility."
                                 />
                               </td>
                               <td className="px-2 py-2.5 align-top">
@@ -907,6 +1015,7 @@ function ProjectPipeline() {
                                   value={item.pitch || '+0Hz'} 
                                   onChange={(e) => updatePhon('pitch', e.target.value)}
                                   className="w-full text-xs border border-slate-200 rounded p-1 font-mono"
+                                  title="Relative pitch. Small changes (about ±2 semitones) subtly deepen or brighten narration; larger changes may sound artificial. Provider units vary."
                                 />
                               </td>
                             </tr>
@@ -1011,16 +1120,58 @@ function ProjectPipeline() {
                 The final audiobook has been assembled and mastered. Listen through the result to verify pronunciation, pacing, and completeness before publishing.
               </p>
 
+              <div className="w-full max-w-4xl grid lg:grid-cols-2 gap-4 mb-6 text-left">
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+                  <div className="px-4 py-3 border-b border-slate-200 text-xs font-bold text-slate-700">Source PDF</div>
+                  <iframe title="Source PDF for final review" src={pdfUrl} className="w-full h-72" />
+                </div>
+
               {/* Mastered Audio Player */}
               <div className="w-full max-w-lg bg-slate-50 border border-slate-200 p-6 rounded-2xl shadow-xs mb-6">
                 <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-4">Mastered Audio (06_mastered.mp3)</h3>
                 <audio 
                   controls 
                   className="w-full"
-                  src={`http://localhost:8000/api/projects/${project}/mastered?token=${user?.token}`}
+                  ref={finalAudioRef}
+                  onTimeUpdate={(e) => setReviewTimestamp(e.currentTarget.currentTime || 0)}
+                  src={reviewData?.audio_url ? `http://localhost:8000${reviewData.audio_url}?token=${user?.token}` : `http://localhost:8000/api/projects/${project}/mastered?token=${user?.token}`}
                 >
                   Your browser does not support the audio tag.
                 </audio>
+              </div>
+              </div>
+
+              <div className="w-full max-w-4xl grid lg:grid-cols-2 gap-4 text-left mb-6">
+                <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Final editorial review</h3>
+                    <span className={`text-[11px] font-semibold ${reviewData?.status === 'approved' ? 'text-green-600' : 'text-amber-600'}`}>
+                      {reviewData ? reviewData.status.replace('_', ' ') : 'candidate pending review'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mb-3">Compare the PDF, transcript and audio above. Add a comment with a severity so corrections can return to the right stage.</p>
+                  <div className="flex gap-2 mb-2">
+                    <select value={reviewSeverity} onChange={(e) => setReviewSeverity(e.target.value)} className="text-xs border border-slate-200 rounded-md px-2 py-2">
+                      <option value="blocker">Blocker</option><option value="major">Major</option><option value="minor">Minor</option>
+                    </select>
+                    <input value={reviewComment} onChange={(e) => setReviewComment(e.target.value)} placeholder={`What needs attention? (at ${Math.floor(reviewTimestamp / 60)}:${String(Math.floor(reviewTimestamp % 60)).padStart(2, '0')})`} className="flex-1 text-xs border border-slate-200 rounded-md px-2 py-2" />
+                    <button disabled={!reviewComment.trim() || reviewIssueMutation.isPending} onClick={() => reviewIssueMutation.mutate()} className="px-3 py-2 rounded-md bg-slate-800 text-white text-xs font-semibold disabled:opacity-50">Add</button>
+                  </div>
+                  {reviewIssueMutation.isError && <p className="text-xs text-red-600 mb-2">{reviewIssueMutation.error.message}</p>}
+                  <div className="space-y-2 max-h-36 overflow-y-auto">
+                    {(reviewData?.issues || []).map(issue => <div key={issue.id} className="border-b border-slate-100 pb-2 text-xs"><span className={`font-semibold mr-2 ${issue.severity === 'blocker' ? 'text-red-600' : 'text-amber-600'}`}>{issue.severity}</span>{issue.body}<div className="flex items-center gap-2 mt-1"><span className="text-[10px] text-slate-400">{issue.status}</span>{(issue.status === 'open' || issue.status === 'reopened') && <button onClick={() => reviewIssueStatusMutation.mutate({ id: issue.id, status: 'resolved' })} className="text-[10px] text-green-700 font-semibold">Mark resolved</button>}</div></div>)}
+                    {reviewData?.issues?.length === 0 && <p className="text-xs text-slate-400">No comments yet.</p>}
+                  </div>
+                </div>
+                <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between">
+                  <div><h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Decision</h3><p className="text-xs text-slate-500">Approval is tied to this exact mastered candidate. A new edit creates a new review cycle.</p></div>
+                  <div className="flex gap-2 mt-4">
+                    <button onClick={() => reviewDecisionMutation.mutate('changes_requested')} disabled={!reviewData || reviewDecisionMutation.isPending} className="flex-1 px-3 py-2 rounded-md border border-amber-300 text-amber-700 text-xs font-semibold disabled:opacity-50">Request changes</button>
+                    <button onClick={() => reviewDecisionMutation.mutate('approved')} disabled={!reviewData || reviewData.open_blockers > 0 || reviewDecisionMutation.isPending} className="flex-1 px-3 py-2 rounded-md bg-green-600 text-white text-xs font-semibold disabled:opacity-50">Approve candidate</button>
+                  </div>
+                  {reviewData?.open_blockers > 0 && <p className="text-[11px] text-red-600 mt-2">Resolve {reviewData.open_blockers} blocking issue(s) before approval.</p>}
+                  {reviewDecisionMutation.isError && <p className="text-xs text-red-600 mt-2">{reviewDecisionMutation.error.message}</p>}
+                </div>
               </div>
 
               <div className="flex gap-4">
@@ -1109,6 +1260,9 @@ function ProjectPipeline() {
                               : `${Math.round(art.file_size / 1024)} KB`}
                           </td>
                           <td className="py-2.5 px-3 text-right">
+                            {(art.file_type === 'txt' || art.file_type === 'json') && (
+                              <button onClick={() => restoreArtifactMutation.mutate(art.filename)} disabled={restoreArtifactMutation.isPending} className="inline-flex items-center gap-1 px-2.5 py-1 mr-2 rounded-md bg-amber-50 hover:bg-amber-100 text-amber-700 text-[11px] font-semibold disabled:opacity-50">Load as draft</button>
+                            )}
                             <a
                               href={`http://localhost:8000${art.download_url}?token=${user?.token}`}
                               download
@@ -1141,4 +1295,3 @@ function ProjectPipeline() {
 }
 
 export default ProjectPipeline
-

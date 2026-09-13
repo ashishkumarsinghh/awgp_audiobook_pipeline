@@ -15,7 +15,7 @@ from src.core.types import NarrationProfile, SpeechSegment
 from src.normalize.segmenter import SemanticSegmenter
 from src.normalize.pronunciation import PronunciationDictionary
 from src.synthesis.prosody import ProsodyPlanner
-from src.synthesis.providers import EdgeTTSProvider, GeminiTTSProvider
+from src.synthesis.providers import EdgeTTSProvider, GeminiTTSProvider, GoogleCloudTTSProvider, AzureSpeechProvider
 from src.synthesis.assembler import AudioAssembler
 
 class ProjectManager:
@@ -41,7 +41,11 @@ class ProjectManager:
     def _get_tts_provider(self, voice: Optional[str] = None):
         voice = voice or os.environ.get('TTS_VOICE') or ('hi-IN-Wavenet-A' if self.tts_provider == 'gemini' else self.profile.voice)
         if self.tts_provider == 'gemini':
-            return GeminiTTSProvider(voice)
+            return GoogleCloudTTSProvider(voice)
+        if self.tts_provider == 'google':
+            return GoogleCloudTTSProvider(voice)
+        if self.tts_provider == 'azure':
+            return AzureSpeechProvider(voice)
         if self.tts_provider == 'edge':
             return EdgeTTSProvider(voice)
         raise ValueError(f'Unsupported TTS provider: {self.tts_provider}')

@@ -98,9 +98,9 @@ class PronunciationDictionary:
         if phrase in self.exact_phrases:
             del self.exact_phrases[phrase]
             
-    def explain(self, text: str) -> dict:
+    def explain(self, text: str, context: str = "general") -> dict:
         original = text
-        applied = self.apply(text)
+        applied = self.apply(text, context=context)
         return {
             "original": original,
             "transformed": applied,
