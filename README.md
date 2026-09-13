@@ -110,9 +110,3 @@ npm run lint
 Pytest collects tests/ only. scripts/test_tts_providers.py is a manual network diagnostic, deliberately excluded from offline tests. Tests use isolated databases, temporary artifacts and provider doubles; live credentials are unnecessary.
 
 See docs/architecture-review.md for findings and remaining work.
-
-## Deploy on Render
-
-The repository includes [`render.yaml`](render.yaml) for the API and Vite frontend. Create a new Render Blueprint from the GitHub repository and apply it. Set `VITE_API_BASE` on `awgp-audiobook-frontend` to the deployed API URL, then set `FRONTEND_ORIGINS` on `awgp-audiobook-api` to the deployed frontend URL. Add `DATABASE_URL` for a managed PostgreSQL database and add `GEMINI_API_KEY` or Azure credentials only when those providers are enabled.
-
-Render Free services sleep when idle and their local filesystem is not suitable for permanent PDFs, audio chunks, or SQLite. Use managed Postgres and durable object storage (S3-compatible) before processing production books. The included configuration is appropriate for a pilot; move API processing and media storage to paid or persistent services as the collection grows.
