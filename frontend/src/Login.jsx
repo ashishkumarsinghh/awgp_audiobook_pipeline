@@ -1,3 +1,4 @@
+import { API_BASE } from './config'
 import { useState, useContext } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { AuthContext } from './AuthContext';
@@ -16,7 +17,7 @@ function Login() {
     setLoading(true);
     setErrorMessage('');
     try {
-      const res = await fetch('http://localhost:8000/api/login', {
+      const res = await fetch(`${API_BASE}/api/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
@@ -29,7 +30,7 @@ function Login() {
         setErrorMessage(data.detail || 'Invalid username or password.');
       }
     } catch (err) {
-      setErrorMessage('Could not connect to backend server on http://localhost:8000. Please ensure the server is running.');
+      setErrorMessage('Could not connect to backend server on ${API_BASE}. Please ensure the server is running.');
     } finally {
       setLoading(false);
     }

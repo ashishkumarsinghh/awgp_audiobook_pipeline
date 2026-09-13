@@ -1,3 +1,4 @@
+import { API_BASE } from './config'
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 
@@ -7,7 +8,7 @@ function Editor() {
   const [error, setError] = useState(null)
 
   useEffect(() => {
-    fetch(`http://localhost:8000/api/projects/${project}/segments`)
+    fetch(`${API_BASE}/api/projects/${project}/segments`)
       .then(async (res) => {
         if (!res.ok) throw new Error(await res.text())
         return res.json()
@@ -17,7 +18,7 @@ function Editor() {
   }, [project])
 
   const runStage = async (stageNum) => {
-    await fetch(`http://localhost:8000/api/projects/${project}/stage/${stageNum}`, { method: 'POST' })
+    await fetch(`${API_BASE}/api/projects/${project}/stage/${stageNum}`, { method: 'POST' })
     alert(`Stage ${stageNum} triggered in the background! Watch the console.`)
   }
 
@@ -69,7 +70,7 @@ function Editor() {
                 <td>
                   <audio 
                     controls 
-                    src={`http://localhost:8000/api/projects/${project}/audio/${seg.id}`} 
+                    src={`${API_BASE}/api/projects/${project}/audio/${seg.id}`} 
                     style={{ width: '150px' }}
                   />
                 </td>

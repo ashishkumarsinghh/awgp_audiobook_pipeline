@@ -1,3 +1,4 @@
+import { API_BASE } from './config'
 import { useState, useContext } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -9,7 +10,8 @@ import {
   ArrowRightOnRectangleIcon, 
   HandRaisedIcon,
   CheckCircleIcon, 
-  ArrowPathIcon
+  ArrowPathIcon,
+  TrashIcon
 } from '@heroicons/react/24/solid'
 import { AuthContext } from './AuthContext'
 
@@ -25,15 +27,28 @@ function Dashboard() {
   const [reqName, setReqName] = useState('')
   const [reqEmail, setReqEmail] = useState('')
   const [reqPhone, setReqPhone] = useState('')
+  const [reqRecordingType, setReqRecordingType] = useState('AI audiobook narration')
+  const [reqLanguage, setReqLanguage] = useState('Hindi')
   
   // Track selected user for each project assignment in the table
   const [selectedAssignments, setSelectedAssignments] = useState({})
+
+  const deleteProjectMutation = useMutation({
+    mutationFn: async (projectName) => {
+      const res = await fetch(`${API_BASE}/api/projects/${projectName}`, {
+        method: 'DELETE', headers: { 'Authorization': `Bearer ${user.token}` }
+      })
+      if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Delete failed') }
+      return res.json()
+    },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['projects'] }); queryClient.invalidateQueries({ queryKey: ['admin-allocations'] }) }
+  })
 
   // Fetch projects
   const { data: dashboardData = { projects: [], metrics: {} }, isLoading: loadingProjects, isError: errorProjects } = useQuery({
     queryKey: ['projects'],
     queryFn: async () => {
-      const res = await fetch(`http://localhost:8000/api/projects`, {
+      const res = await fetch(`${API_BASE}/api/projects`, {
         headers: { 'Authorization': `Bearer ${user?.token}` }
       })
       if (res.status === 401) {
@@ -51,7 +66,7 @@ function Dashboard() {
   const { data: adminData = { users: [], unassigned_projects: [] } } = useQuery({
     queryKey: ['admin-allocations'],
     queryFn: async () => {
-      const res = await fetch('http://localhost:8000/api/admin/allocation-requests', {
+      const res = await fetch(`${API_BASE}/api/admin/allocation-requests`, {
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
       if (!res.ok) throw new Error('Failed to fetch allocations')
@@ -64,7 +79,7 @@ function Dashboard() {
   const { data: editorsList = [] } = useQuery({
     queryKey: ['editors-list'],
     queryFn: async () => {
-      const res = await fetch('http://localhost:8000/api/users', {
+      const res = await fetch(`${API_BASE}/api/users`, {
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
       if (!res.ok) throw new Error('Failed to fetch editors')
@@ -76,7 +91,7 @@ function Dashboard() {
   // Upload project mutation
   const uploadMutation = useMutation({
     mutationFn: async (formData) => {
-      const res = await fetch('http://localhost:8000/api/projects', {
+      const res = await fetch(`${API_BASE}/api/projects`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${user.token}` },
         body: formData
@@ -99,7 +114,7 @@ function Dashboard() {
   // Volunteer request allocation mutation
   const requestAllocationMutation = useMutation({
     mutationFn: async (payload) => {
-      const res = await fetch('http://localhost:8000/api/users/request-allocation', {
+      const res = await fetch(`${API_BASE}/api/users/request-allocation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
         body: JSON.stringify(payload)
@@ -118,7 +133,7 @@ function Dashboard() {
       const formData = new FormData()
       formData.append('user_id', userId)
       formData.append('project_id', projectId)
-      const res = await fetch('http://localhost:8000/api/admin/allocate-user', {
+      const res = await fetch(`${API_BASE}/api/admin/allocate-user`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${user.token}` },
         body: formData
@@ -137,7 +152,7 @@ function Dashboard() {
     mutationFn: async ({ projectName, userId }) => {
       const formData = new FormData()
       if (userId) formData.append('user_id', userId)
-      const res = await fetch(`http://localhost:8000/api/projects/${projectName}/assign`, {
+      const res = await fetch(`${API_BASE}/api/projects/${projectName}/assign`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${user.token}` },
         body: formData
@@ -160,20 +175,27 @@ function Dashboard() {
     e.preventDefault()
     if (!newProjectName || !file) return alert('Name and file required')
     const formData = new FormData()
-    formData.append('name', newProjectName.replace(/[^a-zA-Z0-9_-]/g, '_'))
+    formData.append('name', newProjectName.trim().replace(/[^a-zA-Z0-9_-]/g, '_'))
+    formData.append('display_name', newProjectName.trim())
     formData.append('file', file)
     uploadMutation.mutate(formData)
   }
 
   const handleRequestAllocation = (e) => {
     e.preventDefault()
-    requestAllocationMutation.mutate({ full_name: reqName, email: reqEmail, phone: reqPhone })
+    requestAllocationMutation.mutate({ full_name: reqName, email: reqEmail, phone: reqPhone, recording_type: reqRecordingType, language: reqLanguage })
   }
 
   const formatStageBadge = (status) => {
     switch (status) {
       case '05_Mastered':
         return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-800"><CheckCircleIcon className="w-4 h-4 mr-1 text-green-600"/> Mastered</span>
+      case '06_Approved':
+        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-800"><CheckCircleIcon className="w-4 h-4 mr-1 text-green-600"/> Approved for Release</span>
+      case '06_Changes_Requested':
+        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">Changes Requested</span>
+      case '06_Pending_Second_Approval':
+        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-800">Awaiting 2nd Approval</span>
       case '04_Audio_Review':
         return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800"><CheckCircleIcon className="w-4 h-4 mr-1 text-purple-600"/> Audio Review</span>
       case '03_Synthesizing':
@@ -233,7 +255,7 @@ function Dashboard() {
         {user?.role === 'admin' && (
           <div className="mb-8">
             <h2 className="text-lg font-bold text-slate-800 mb-4">Production Overview</h2>
-            <dl className="grid grid-cols-1 gap-5 sm:grid-cols-4">
+            <dl className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
                 <dt className="text-xs font-semibold text-slate-500 uppercase">Total Books</dt>
                 <dd className="mt-2 text-3xl font-bold text-slate-900">{metrics.total || 0}</dd>
@@ -249,6 +271,26 @@ function Dashboard() {
               <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
                 <dt className="text-xs font-semibold text-green-600 uppercase">Mastered Final</dt>
                 <dd className="mt-2 text-3xl font-bold text-green-600">{metrics.mastered || 0}</dd>
+              </div>
+              <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
+                <dt className="text-xs font-semibold text-purple-600 uppercase">Awaiting Review</dt>
+                <dd className="mt-2 text-3xl font-bold text-purple-600">{metrics.audio_review || 0}</dd>
+              </div>
+              <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
+                <dt className="text-xs font-semibold text-red-600 uppercase">Open Blockers</dt>
+                <dd className="mt-2 text-3xl font-bold text-red-600">{metrics.open_blockers || 0}</dd>
+              </div>
+              <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
+                <dt className="text-xs font-semibold text-rose-600 uppercase">Open Review Issues</dt>
+                <dd className="mt-2 text-3xl font-bold text-rose-600">{metrics.open_issues || 0}</dd>
+              </div>
+              <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
+                <dt className="text-xs font-semibold text-orange-600 uppercase">Failed Audio Chunks</dt>
+                <dd className="mt-2 text-3xl font-bold text-orange-600">{metrics.failed_chunks || 0}</dd>
+              </div>
+              <div className="rounded-xl bg-white p-5 shadow-sm border border-slate-200">
+                <dt className="text-xs font-semibold text-amber-600 uppercase">Pacing Warnings</dt>
+                <dd className="mt-2 text-3xl font-bold text-amber-600">{metrics.pace_warnings || 0}</dd>
               </div>
             </dl>
           </div>
@@ -267,6 +309,7 @@ function Dashboard() {
                   <div>
                     <p className="text-sm font-bold text-slate-900">{req.full_name || req.username} <span className="text-xs text-slate-500 font-normal">(@{req.username})</span></p>
                     <p className="text-xs text-slate-500">{req.email || 'No email'} • {req.phone || 'No phone'}</p>
+                    <p className="text-xs text-slate-500">{req.language || 'Language unspecified'} • {req.recording_type || 'Recording type unspecified'}</p>
                   </div>
                   <div className="flex items-center gap-3">
                     <select 
@@ -327,6 +370,20 @@ function Dashboard() {
                 <div>
                   <label className="block text-xs font-semibold uppercase text-slate-600 mb-1">Mobile / WhatsApp Number</label>
                   <input type="tel" required value={reqPhone} onChange={e=>setReqPhone(e.target.value)} placeholder="+91 9876543210" className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none" />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs font-semibold uppercase text-slate-600 mb-1">Recording Type</label>
+                    <select value={reqRecordingType} onChange={e=>setReqRecordingType(e.target.value)} className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-blue-500 outline-none">
+                      <option>AI audiobook narration</option><option>Quality audit / review</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold uppercase text-slate-600 mb-1">Language of Choice</label>
+                    <select value={reqLanguage} onChange={e=>setReqLanguage(e.target.value)} className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm bg-white focus:ring-2 focus:ring-blue-500 outline-none">
+                      <option>Hindi</option><option>Sanskrit</option><option>Hindi + Sanskrit</option>
+                    </select>
+                  </div>
                 </div>
                 <button 
                   type="submit" 
@@ -391,10 +448,10 @@ function Dashboard() {
                       <td className="py-4 pl-6 pr-3 font-semibold text-slate-900">
                         <Link to={`/project/${project.name}`} className="hover:text-blue-600 flex items-center gap-2">
                           <BookOpenIcon className="w-4 h-4 text-blue-500"/>
-                          {project.name}
+        {project.display_name || project.name}
                         </Link>
                       </td>
-                      <td className="px-3 py-4">{formatStageBadge(project.status)}</td>
+                    <td className="px-3 py-4">{formatStageBadge(project.stage || project.status)}</td>
                       
                       {/* Allocation Column */}
                       <td className="px-3 py-4">
@@ -448,6 +505,16 @@ function Dashboard() {
                         >
                           Open Workspace →
                         </Link>
+                        {user?.role === 'admin' && (
+                          <button
+              onClick={() => { if (window.confirm(`Delete project “${project.display_name || project.name}” and all its artifacts? This cannot be undone.`)) deleteProjectMutation.mutate(project.name) }}
+                            disabled={deleteProjectMutation.isPending}
+                            title="Delete project (admin only)"
+                            className="inline-flex items-center ml-2 px-2 py-1.5 rounded-md text-red-600 hover:bg-red-50 border border-transparent hover:border-red-200 disabled:opacity-50"
+                          >
+                            <TrashIcon className="w-4 h-4" />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -468,12 +535,12 @@ function Dashboard() {
             </p>
             <form onSubmit={handleUpload} className="space-y-4">
               <div>
-                <label className="block text-xs font-semibold uppercase text-slate-600 mb-1">Project Identifier</label>
+                <label className="block text-xs font-semibold uppercase text-slate-600 mb-1">Book name / project name</label>
                 <input 
                   type="text" 
                   required 
                   className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none" 
-                  placeholder="e.g. brahma_sandhya" 
+                  placeholder="e.g. In The Angelic Light Of Rishi Thoughts 1" 
                   value={newProjectName} 
                   onChange={e => setNewProjectName(e.target.value)} 
                 />

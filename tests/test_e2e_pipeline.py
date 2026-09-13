@@ -62,9 +62,18 @@ def test_full_pipeline_e2e(client, auth_headers, db_session, tmp_path):
     res = client.get("/api/projects/e2e_book/phonetics", headers=auth_headers)
     assert "pronunciation_text" in res.json()[0]
 
+    # A checker edit must be the exact input consumed by Audio, even when a
+    # previous chunk exists in the resumable audio directory.
+    phonetics = res.json()
+    phonetics[0]["pronunciation_text"] = "EDITOR OVERRIDE pronunciation"
+    res = client.put("/api/projects/e2e_book/phonetics", json=phonetics, headers=auth_headers)
+    assert res.status_code == 200
+
     # Generate actual PCM artifacts with a local provider double.
     from tests.test_pipeline import create_fake_wav
+    synthesized_text = []
     async def synthesize(segment, output):
+        synthesized_text.append(segment.pronunciation_text)
         create_fake_wav(output, 1000)
     def master(source, output, **kwargs):
         with open(output, "wb") as stream:
@@ -72,6 +81,7 @@ def test_full_pipeline_e2e(client, auth_headers, db_session, tmp_path):
     with patch("src.synthesis.providers.EdgeTTSProvider.synthesize", side_effect=synthesize):
         res = client.post("/api/projects/e2e_book/stage/4", headers=auth_headers)
         assert res.status_code == 200
+    assert "EDITOR OVERRIDE pronunciation" in synthesized_text
     details = client.get("/api/projects/e2e_book", headers=auth_headers).json()
     assert details["status"] == "04_Audio_Review"
     assert details["audio_progress"]["percent"] == 100

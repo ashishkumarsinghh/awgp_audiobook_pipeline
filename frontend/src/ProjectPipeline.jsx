@@ -1,3 +1,4 @@
+import { API_BASE } from './config'
 import { useState, useEffect, useContext, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -51,7 +52,7 @@ function ProjectPipeline() {
   const [reviewTimestamp, setReviewTimestamp] = useState(0)
   const restoreArtifactMutation = useMutation({
     mutationFn: async (filename) => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/artifacts/${encodeURIComponent(filename)}/restore`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/artifacts/${encodeURIComponent(filename)}/restore`, {
         method: 'POST', headers: { 'Authorization': `Bearer ${user.token}` }
       })
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Could not restore artifact') }
@@ -68,7 +69,7 @@ function ProjectPipeline() {
   const { data: projectDetails, isLoading: loadingDetails, isError: errorDetails } = useQuery({
     queryKey: ['projectDetails', project],
     queryFn: async () => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}`, {
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
       if (!res.ok) throw new Error('Failed to load project details')
@@ -83,14 +84,14 @@ function ProjectPipeline() {
 
   const { data: voiceCatalog = { voices: [] } } = useQuery({
     queryKey: ['ttsVoices'], queryFn: async () => {
-      const res = await fetch('http://localhost:8000/api/tts/voices', { headers: { 'Authorization': `Bearer ${user.token}` } })
+      const res = await fetch(`${API_BASE}/api/tts/voices`, { headers: { 'Authorization': `Bearer ${user.token}` } })
       if (!res.ok) throw new Error('Failed to load voices')
       return res.json()
     }
   })
   const { data: ttsSettings } = useQuery({
     queryKey: ['ttsSettings', project], queryFn: async () => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/settings/tts-provider`, { headers: { 'Authorization': `Bearer ${user.token}` } })
+      const res = await fetch(`${API_BASE}/api/projects/${project}/settings/tts-provider`, { headers: { 'Authorization': `Bearer ${user.token}` } })
       if (!res.ok) throw new Error('Failed to load voice settings')
       return res.json()
     }
@@ -98,7 +99,7 @@ function ProjectPipeline() {
   useEffect(() => { if (ttsSettings) { setTtsProvider(ttsSettings.provider); setTtsVoice(ttsSettings.voice) } }, [ttsSettings])
   const saveTtsSettingsMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/settings/tts-provider`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` }, body: JSON.stringify({ provider: ttsProvider, voice: ttsVoice }) })
+      const res = await fetch(`${API_BASE}/api/projects/${project}/settings/tts-provider`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` }, body: JSON.stringify({ provider: ttsProvider, voice: ttsVoice }) })
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Could not save voice settings') }
       return res.json()
     },
@@ -109,7 +110,7 @@ function ProjectPipeline() {
   const { data: rawData, isLoading: loadingRaw } = useQuery({
     queryKey: ['rawText', project],
     queryFn: async () => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/raw`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/raw`, {
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
       if (res.status === 404) return { raw_text: '', clean_text: '', text: '', has_clean: false }
@@ -122,7 +123,7 @@ function ProjectPipeline() {
   const { data: segmentsData = [], isLoading: loadingSegments } = useQuery({
     queryKey: ['segments', project],
     queryFn: async () => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/segments`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/segments`, {
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
       if (res.status === 404) return []
@@ -137,7 +138,7 @@ function ProjectPipeline() {
   const { data: artifactsList = [], refetch: refetchArtifacts } = useQuery({
     queryKey: ['artifacts', project],
     queryFn: async () => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/artifacts`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/artifacts`, {
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
       if (!res.ok) return []
@@ -148,19 +149,19 @@ function ProjectPipeline() {
   const { data: reviewData, refetch: refetchReview } = useQuery({
     queryKey: ['review', project],
     queryFn: async () => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/review`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/review`, {
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
       if (res.status === 404) return null
       if (!res.ok) throw new Error('Failed to load review candidate')
       return res.json()
     },
-    enabled: Boolean(projectDetails?.has_mastered || projectDetails?.status === '05_Mastered' || projectDetails?.status === '06_Approved')
+    enabled: Boolean(projectDetails?.has_mastered || ['05_Mastered', '06_Pending_Second_Approval', '06_Approved'].includes(projectDetails?.status))
   })
 
   const reviewIssueMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/review/issues`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/review/issues`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
         body: JSON.stringify({ body: reviewComment, severity: reviewSeverity, start_seconds: Math.floor(reviewTimestamp) })
       })
@@ -172,7 +173,7 @@ function ProjectPipeline() {
 
   const reviewDecisionMutation = useMutation({
     mutationFn: async (decision) => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/review/decision`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/review/decision`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
         body: JSON.stringify({ decision })
       })
@@ -185,7 +186,7 @@ function ProjectPipeline() {
   const reviewIssueStatusMutation = useMutation({
     mutationFn: async ({ id, status }) => {
       const body = new URLSearchParams({ status })
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/review/issues/${id}`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/review/issues/${id}`, {
         method: 'PATCH', headers: { 'Authorization': `Bearer ${user.token}` }, body
       })
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Could not update issue') }
@@ -197,7 +198,7 @@ function ProjectPipeline() {
   const { data: phoneticsData = [], isLoading: loadingPhonetics } = useQuery({
     queryKey: ['phonetics', project],
     queryFn: async () => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/phonetics`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/phonetics`, {
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
       if (res.status === 404) return []
@@ -253,7 +254,7 @@ function ProjectPipeline() {
         setCurrentStep(3)
       } else if (s === '04_Audio_Review') {
         setCurrentStep(4)
-      } else if (s === '05_Mastered' || s === '06_Approved' || s === '06_Changes_Requested') {
+      } else if (s === '05_Mastered' || s === '06_Pending_Second_Approval' || s === '06_Approved' || s === '06_Changes_Requested') {
         setCurrentStep(5)
       }
       setStatusInitialized(true)
@@ -263,7 +264,7 @@ function ProjectPipeline() {
   // Mutation: Save Clean Text (Stage 1)
   const saveCleanMutation = useMutation({
     mutationFn: async (text) => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/clean`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/clean`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
         body: JSON.stringify({ text })
@@ -281,7 +282,7 @@ function ProjectPipeline() {
   // Mutation: Save Segments (Stage 2)
   const saveSegmentsMutation = useMutation({
     mutationFn: async (updates) => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/segments`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/segments`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
         body: JSON.stringify(updates)
@@ -299,7 +300,7 @@ function ProjectPipeline() {
   // Mutation: Save Phonetics (Stage 3)
   const savePhoneticsMutation = useMutation({
     mutationFn: async (updates) => {
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/phonetics`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/phonetics`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
         body: JSON.stringify(updates)
@@ -326,7 +327,7 @@ function ProjectPipeline() {
         if (localPhonetics.length > 0) await savePhoneticsMutation.mutateAsync(localPhonetics)
       }
 
-      const res = await fetch(`http://localhost:8000/api/projects/${project}/stage/${stageNum + 1}`, {
+      const res = await fetch(`${API_BASE}/api/projects/${project}/stage/${stageNum + 1}`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
@@ -370,7 +371,7 @@ function ProjectPipeline() {
     }
   }, [runStageMutation.isPending])
 
-  const pdfUrl = `http://localhost:8000/api/projects/${project}/pdf?token=${user?.token}`
+  const pdfUrl = `${API_BASE}/api/projects/${project}/pdf?token=${user?.token}`
 
   const isLoading = loadingDetails || loadingRaw
   const activeSegments = localSegments.length > 0 ? localSegments : segmentsData
@@ -399,7 +400,7 @@ function ProjectPipeline() {
 
         {/* Action button in header if applicable */}
         <div className="flex items-center gap-3">
-          <div className="hidden xl:flex items-center gap-1.5 text-xs" title="Choose one of the curated Hindi/Sanskrit voices. Changing voice invalidates matching audio chunks.">
+          <div className="flex items-center gap-1.5 text-xs flex-wrap" title="Choose one of the curated Hindi/Sanskrit voices. Changing voice invalidates matching audio chunks.">
             <select value={ttsProvider} onChange={(e) => { setTtsProvider(e.target.value); const first = voiceCatalog.voices.find(v => v.provider === e.target.value); if (first) setTtsVoice(first.voice) }} className="border border-slate-200 rounded-md px-1.5 py-1 bg-white">
               <option value="edge">Edge</option><option value="google">Google Cloud</option><option value="azure">Azure</option>
             </select>
@@ -418,7 +419,7 @@ function ProjectPipeline() {
           </button>
           {projectDetails?.has_mastered && (
             <a 
-              href={`http://localhost:8000/api/projects/${project}/mastered?token=${user?.token}`} 
+              href={`${API_BASE}/api/projects/${project}/mastered?token=${user?.token}`} 
               download 
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-600 text-white text-xs font-semibold hover:bg-green-700 transition"
             >
@@ -467,6 +468,12 @@ function ProjectPipeline() {
               {projectDetails.audio_progress.failed.map(chunk => (
                 <p key={chunk.id}>{chunk.id}: {chunk.error}</p>
               ))}
+            </div>
+          )}
+          {projectDetails?.audio_progress?.pace_warnings?.length > 0 && (
+            <div role="status" className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+              <p className="font-semibold">Pacing needs review</p>
+              <p>Some chunks are outside the recommended 115–175 words per minute range. Listen to these chunks and adjust rate or segmentation before mastering.</p>
             </div>
           )}
 
@@ -671,6 +678,16 @@ function ProjectPipeline() {
                 <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 flex justify-between items-center shrink-0">
                   <h2 className="text-xs font-bold uppercase text-slate-700">Allocated Source PDF</h2>
                   <span className="text-xs text-slate-400 font-mono">00_scanned.pdf</span>
+                </div>
+
+                <div className="mx-4 mt-3 mb-2 rounded-lg border border-blue-100 bg-blue-50/60 p-3 text-[11px] text-blue-900">
+                  <p className="font-semibold mb-1">How rate and pitch affect listening</p>
+                  <div className="grid sm:grid-cols-3 gap-2 text-blue-800">
+                    <span><b>Rate</b>: -10% is slower and clearer but lengthens the book; +10% is faster but may reduce clarity.</span>
+                    <span><b>Pitch</b>: small changes (about ±2 semitones/Hz) deepen or brighten the voice; larger changes can sound artificial.</span>
+                    <span><b>Pronunciation</b>: changes only the spoken form. The printed source remains unchanged and can be restored.</span>
+                  </div>
+                  <p className="mt-2 text-[10px] text-blue-700">Preview one segment after changing a value. Provider units vary, so keep adjustments conservative.</p>
                 </div>
                 <div className="flex-1 relative bg-slate-100">
                   <iframe src={pdfUrl} className="absolute inset-0 w-full h-full border-0" title="Source PDF Viewer" />
@@ -951,11 +968,11 @@ function ProjectPipeline() {
                     </button>
                     <button 
                       onClick={() => runStageMutation.mutate(3)} 
-                      disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending || activePhonetics.length === 0}
+                      disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending || savePhoneticsMutation.isPending || activePhonetics.length === 0}
                       className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs font-semibold cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
                     >
                       {runStageMutation.isPending && <ArrowPathIcon className="w-3.5 h-3.5 animate-spin"/>}
-                      {runStageMutation.isPending ? 'Synthesizing...' : 'Generate Audio →'}
+                      {runStageMutation.isPending ? 'Synthesizing...' : savePhoneticsMutation.isPending ? 'Saving edits...' : 'Generate Audio →'}
                     </button>
                   </div>
                 </div>
@@ -1098,7 +1115,7 @@ function ProjectPipeline() {
                         <p className="text-xs font-medium text-slate-800 leading-relaxed">{seg.source_text}</p>
                       </div>
                       <div className="w-full lg:w-96 shrink-0">
-                        <WaveSurferPlayer url={`http://localhost:8000/api/projects/${project}/audio/${seg.id}?token=${user?.token}`} />
+                        <WaveSurferPlayer url={`${API_BASE}/api/projects/${project}/audio/${seg.id}?token=${user?.token}`} />
                       </div>
                     </div>
                   ))}
@@ -1111,7 +1128,7 @@ function ProjectPipeline() {
           {/* STAGE 5: MASTERED FINAL AUDIOBOOK */}
           {/* ========================================================================= */}
           {currentStep === 5 && (
-            <div className="bg-white rounded-xl shadow-xs border border-slate-200 overflow-hidden flex flex-col items-center justify-center p-8 text-center h-full">
+            <div className="relative bg-white rounded-xl shadow-xs border border-slate-200 overflow-y-auto flex flex-col items-stretch justify-start p-6 text-center h-full">
               <div className="w-16 h-16 rounded-full bg-green-50 text-green-600 flex items-center justify-center mb-4">
                 <CheckCircleIcon className="w-10 h-10" />
               </div>
@@ -1120,28 +1137,28 @@ function ProjectPipeline() {
                 The final audiobook has been assembled and mastered. Listen through the result to verify pronunciation, pacing, and completeness before publishing.
               </p>
 
-              <div className="w-full max-w-4xl grid lg:grid-cols-2 gap-4 mb-6 text-left">
+              <div className="w-full max-w-6xl lg:mr-96 flex flex-col gap-3 mb-6 text-left">
                 <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
                   <div className="px-4 py-3 border-b border-slate-200 text-xs font-bold text-slate-700">Source PDF</div>
-                  <iframe title="Source PDF for final review" src={pdfUrl} className="w-full h-72" />
+                  <iframe title="Source PDF for final review" src={pdfUrl} className="w-full h-[55vh] min-h-[420px]" />
                 </div>
 
               {/* Mastered Audio Player */}
-              <div className="w-full max-w-lg bg-slate-50 border border-slate-200 p-6 rounded-2xl shadow-xs mb-6">
-                <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-4">Mastered Audio (06_mastered.mp3)</h3>
+              <div className="w-full bg-slate-50 border border-slate-200 p-3 rounded-xl shadow-xs">
+                <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Mastered audio · review candidate</h3>
                 <audio 
                   controls 
                   className="w-full"
                   ref={finalAudioRef}
                   onTimeUpdate={(e) => setReviewTimestamp(e.currentTarget.currentTime || 0)}
-                  src={reviewData?.audio_url ? `http://localhost:8000${reviewData.audio_url}?token=${user?.token}` : `http://localhost:8000/api/projects/${project}/mastered?token=${user?.token}`}
+                  src={reviewData?.audio_url ? `${API_BASE}${reviewData.audio_url}?token=${user?.token}` : `${API_BASE}/api/projects/${project}/mastered?token=${user?.token}`}
                 >
                   Your browser does not support the audio tag.
                 </audio>
               </div>
               </div>
 
-              <div className="w-full max-w-4xl grid lg:grid-cols-2 gap-4 text-left mb-6">
+              <div className="w-full lg:absolute lg:right-6 lg:top-20 lg:w-80 grid grid-cols-1 gap-4 text-left mb-6">
                 <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Final editorial review</h3>
@@ -1154,7 +1171,7 @@ function ProjectPipeline() {
                     <select value={reviewSeverity} onChange={(e) => setReviewSeverity(e.target.value)} className="text-xs border border-slate-200 rounded-md px-2 py-2">
                       <option value="blocker">Blocker</option><option value="major">Major</option><option value="minor">Minor</option>
                     </select>
-                    <input value={reviewComment} onChange={(e) => setReviewComment(e.target.value)} placeholder={`What needs attention? (at ${Math.floor(reviewTimestamp / 60)}:${String(Math.floor(reviewTimestamp % 60)).padStart(2, '0')})`} className="flex-1 text-xs border border-slate-200 rounded-md px-2 py-2" />
+         <textarea rows={3} value={reviewComment} onChange={(e) => setReviewComment(e.target.value)} placeholder={`What needs attention? (at ${Math.floor(reviewTimestamp / 60)}:${String(Math.floor(reviewTimestamp % 60)).padStart(2, '0')})`} className="flex-1 min-h-20 text-xs border border-slate-200 rounded-md px-2 py-2 resize-y focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none" />
                     <button disabled={!reviewComment.trim() || reviewIssueMutation.isPending} onClick={() => reviewIssueMutation.mutate()} className="px-3 py-2 rounded-md bg-slate-800 text-white text-xs font-semibold disabled:opacity-50">Add</button>
                   </div>
                   {reviewIssueMutation.isError && <p className="text-xs text-red-600 mb-2">{reviewIssueMutation.error.message}</p>}
@@ -1164,7 +1181,7 @@ function ProjectPipeline() {
                   </div>
                 </div>
                 <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between">
-                  <div><h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Decision</h3><p className="text-xs text-slate-500">Approval is tied to this exact mastered candidate. A new edit creates a new review cycle.</p></div>
+       <div><h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">Decision</h3><p className="text-xs text-slate-500">Approval is tied to this exact mastered candidate. Two different human reviewers must approve before release.</p>{reviewData && <p className="text-xs font-semibold text-blue-700 mt-2">Human approvals: {reviewData.approval_count || 0} / {reviewData.required_approvals || 2}</p>}</div>
                   <div className="flex gap-2 mt-4">
                     <button onClick={() => reviewDecisionMutation.mutate('changes_requested')} disabled={!reviewData || reviewDecisionMutation.isPending} className="flex-1 px-3 py-2 rounded-md border border-amber-300 text-amber-700 text-xs font-semibold disabled:opacity-50">Request changes</button>
                     <button onClick={() => reviewDecisionMutation.mutate('approved')} disabled={!reviewData || reviewData.open_blockers > 0 || reviewDecisionMutation.isPending} className="flex-1 px-3 py-2 rounded-md bg-green-600 text-white text-xs font-semibold disabled:opacity-50">Approve candidate</button>
@@ -1176,7 +1193,7 @@ function ProjectPipeline() {
 
               <div className="flex gap-4">
                 <a 
-                  href={`http://localhost:8000/api/projects/${project}/mastered?token=${user?.token}`}
+                  href={`${API_BASE}/api/projects/${project}/mastered?token=${user?.token}`}
                   download 
                   className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 shadow-xs transition cursor-pointer"
                 >
@@ -1264,7 +1281,7 @@ function ProjectPipeline() {
                               <button onClick={() => restoreArtifactMutation.mutate(art.filename)} disabled={restoreArtifactMutation.isPending} className="inline-flex items-center gap-1 px-2.5 py-1 mr-2 rounded-md bg-amber-50 hover:bg-amber-100 text-amber-700 text-[11px] font-semibold disabled:opacity-50">Load as draft</button>
                             )}
                             <a
-                              href={`http://localhost:8000${art.download_url}?token=${user?.token}`}
+                              href={`${API_BASE}${art.download_url}?token=${user?.token}`}
                               download
                               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700 text-[11px] font-semibold transition cursor-pointer"
                             >

@@ -23,7 +23,9 @@ cd frontend
 npm run dev
 ~~~
 
-For a new installation, skip the migration until the API creates its database. The migration is idempotent and creates a timestamped SQLite backup before adding missing TTS columns.\n\nThe frontend is at http://localhost:5173 and API documentation at http://localhost:8000/docs. The first registered account becomes administrator; later accounts are editors. Administrators assign books to editors.
+For a new installation, skip the migration until the API creates its database. The migration is idempotent and creates a timestamped SQLite backup before adding missing columns.
+
+The frontend is at http://localhost:5173 and API documentation at http://localhost:8000/docs. The first registered account becomes administrator; later accounts are editors. Editors register their volunteer profile and request allocation; only administrators can assign books. Uploaded book titles are preserved for display, while the API generates a unique safe slug for storage and URLs.
 
 Existing start.sh/start.ps1/start.bat launchers remain available. start.sh currently kills processes occupying its ports and exports .env through shell word splitting; use the explicit commands above when other services share the machine.
 
@@ -50,6 +52,7 @@ Edge requires network access. Google Cloud TTS requires the optional google-clou
 4. Run Phonetics and review pronunciation aliases, rate, pitch and pauses.
 5. Run Audio. Progress reports current completed chunks and individual errors. Retry after correcting an error to resume verified work.
 6. Listen to the chunks, then run Mastering. Listen through the final book before publishing.
+7. Final release requires two approvals from different human reviewers. A first approval moves the candidate to “Awaiting second approval”; unresolved blockers or a duplicate reviewer cannot complete release.
 
 OCR preserves the existing transcription prompt. Shantikunj normalization helpers remain opt-in utilities, not an automatic rewrite of sacred text. Blank/unreadable pages stop OCR with their page number and require review rather than being silently skipped.
 
@@ -107,3 +110,9 @@ npm run lint
 Pytest collects tests/ only. scripts/test_tts_providers.py is a manual network diagnostic, deliberately excluded from offline tests. Tests use isolated databases, temporary artifacts and provider doubles; live credentials are unnecessary.
 
 See docs/architecture-review.md for findings and remaining work.
+
+## Deploy on Render
+
+The repository includes [`render.yaml`](render.yaml) for the API and Vite frontend. Create a new Render Blueprint from the GitHub repository and apply it. Set `VITE_API_BASE` on `awgp-audiobook-frontend` to the deployed API URL, then set `FRONTEND_ORIGINS` on `awgp-audiobook-api` to the deployed frontend URL. Add `DATABASE_URL` for a managed PostgreSQL database and add `GEMINI_API_KEY` or Azure credentials only when those providers are enabled.
+
+Render Free services sleep when idle and their local filesystem is not suitable for permanent PDFs, audio chunks, or SQLite. Use managed Postgres and durable object storage (S3-compatible) before processing production books. The included configuration is appropriate for a pilot; move API processing and media storage to paid or persistent services as the collection grows.

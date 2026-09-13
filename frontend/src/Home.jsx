@@ -1,7 +1,17 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { BookOpenIcon, MicrophoneIcon, SparklesIcon, UsersIcon } from '@heroicons/react/24/outline';
 
 export default function Home() {
+  const [selectedStage, setSelectedStage] = useState(0)
+  const stages = [
+    ['1 · Source & OCR', 'The PDF remains the source of truth. OCR creates editable text and flags uncertain passages for checking.'],
+    ['2 · Text refinement', 'Editors correct spelling, punctuation, paragraph flow, English words, and print errors before narration.'],
+    ['3 · Segmentation', 'Text is split into listenable chunks with semantic tags and intentional pauses at sentence, paragraph, and verse boundaries.'],
+    ['4 · Phonetic scripting', 'Editors can override pronunciation, rate, pitch, and Sanskrit recitation cues. Every saved override is used for synthesis.'],
+    ['5 · Audio review', 'Chunks are generated resumably, checked for pacing and failures, and replayed individually before mastering.'],
+    ['6 · Two-person release', 'The PDF and mastered audio are reviewed together. Two different human reviewers must approve the exact candidate before release.'],
+  ]
   return (
     <div className="bg-white">
       {/* Navigation */}
@@ -63,7 +73,16 @@ export default function Home() {
             </p>
           </div>
           <div className="mx-auto mt-16 max-w-2xl sm:mt-20 lg:mt-24 lg:max-w-4xl">
-            <dl className="grid max-w-xl grid-cols-1 gap-x-8 gap-y-10 lg:max-w-none lg:grid-cols-2 lg:gap-y-16">
+            <div className="grid lg:grid-cols-[0.9fr_1.1fr] gap-6 mt-10">
+              <div className="space-y-2" role="tablist" aria-label="Pipeline stages">
+                {stages.map(([name], index) => <button key={name} role="tab" aria-selected={selectedStage === index} onClick={() => setSelectedStage(index)} className={`w-full text-left rounded-lg border px-4 py-3 text-sm font-semibold transition ${selectedStage === index ? 'bg-blue-600 text-white border-blue-600 shadow-md' : 'bg-white text-slate-700 border-slate-200 hover:border-blue-300'}`}>{name}</button>)}
+              </div>
+              <div className="rounded-xl bg-white border border-slate-200 shadow-sm p-7 min-h-64 flex flex-col justify-between" role="tabpanel">
+                <div><p className="text-xs uppercase tracking-wider font-bold text-blue-600">Selected stage</p><h3 className="mt-2 text-2xl font-bold text-slate-900">{stages[selectedStage][0]}</h3><p className="mt-4 text-base leading-7 text-slate-600">{stages[selectedStage][1]}</p></div>
+                <div className="flex justify-between mt-8"><button onClick={() => setSelectedStage(Math.max(0, selectedStage - 1))} disabled={selectedStage === 0} className="text-sm font-semibold text-slate-500 disabled:opacity-30">← Previous</button><button onClick={() => setSelectedStage(Math.min(stages.length - 1, selectedStage + 1))} disabled={selectedStage === stages.length - 1} className="text-sm font-semibold text-blue-600 disabled:opacity-30">Next stage →</button></div>
+              </div>
+            </div>
+            <dl className="grid max-w-xl grid-cols-1 gap-x-8 gap-y-10 lg:max-w-none lg:grid-cols-2 lg:gap-y-16 mt-16">
               {[
                 {
                   name: 'Gemini Vision OCR',

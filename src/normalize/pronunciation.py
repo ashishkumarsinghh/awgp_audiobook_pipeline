@@ -107,6 +107,20 @@ class PronunciationDictionary:
             "modified": original != applied
         }
 
+    @staticmethod
+    def analyze_marks(text: str) -> dict:
+        """Return Devanagari marks that deserve pronunciation review."""
+        value = unicodedata.normalize("NFC", text or "")
+        return {
+            "chandrabindu": value.count("ँ"),
+            "anusvara": value.count("ं"),
+            "visarga": value.count("ः"),
+            "avagraha": value.count("ऽ"),
+            "virama": value.count("्"),
+            "vowel_marks": sum(value.count(mark) for mark in "ािीुूृॄॅॆेैॉॊोौ"),
+            "has_sanskrit_marks": any(mark in value for mark in "ँःऽ॒॓॑॔ॐ")
+        }
+
     def apply(self, text: str, context: str = "general") -> str:
         # Normalize Unicode and clean TTS-breaking artifacts
         text = unicodedata.normalize('NFC', text)

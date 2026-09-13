@@ -34,6 +34,8 @@ class NarrationProfile:
     verse_pause_ms: int = 600
     heading_pause_ms: int = 800
     prosody_variation: str = "low"
+    target_wpm: int = 145
+    wpm_tolerance_percent: int = 18
 
 @dataclass
 class SpeechSegment:

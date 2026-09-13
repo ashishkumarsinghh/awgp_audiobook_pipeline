@@ -16,7 +16,7 @@ class ProsodyPlanner:
                 if seg.segment_type == "heading":
                     seg.pause_before_ms = self.profile.heading_pause_ms
                     seg.pause_after_ms = self.profile.heading_pause_ms
-                elif seg.segment_type == "shloka":
+                elif seg.segment_type in ["shloka", "stanza", "verse_line", "mantra", "chant_refrain"]:
                     seg.pause_after_ms = self.profile.verse_pause_ms
                 else:
                     seg.pause_after_ms = self.profile.sentence_pause_ms
@@ -29,8 +29,10 @@ class ProsodyPlanner:
                 rate_var = -2
                 pitch_var = 2
             elif seg.segment_type in ["shloka", "stanza", "verse_line", "mantra", "chant_refrain"]:
-                rate_var = -5
-                pitch_var = -1
+                # Recitation is deliberately slower and lower than prose so
+                # conjuncts, matras and verse boundaries remain intelligible.
+                rate_var = -10
+                pitch_var = -2
             elif seg.segment_type in ["heading", "subheading", "book_title"]:
                 pitch_var = -2
                 rate_var = 0

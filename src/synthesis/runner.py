@@ -22,6 +22,9 @@ def audio_digest(path):
             digest.update(block)
     return digest.hexdigest()
 
+def _word_count(text: str) -> int:
+    return len([token for token in (text or "").split() if token.strip()])
+
 
 def as_segment(item, audio_dir):
     fields = {k: v for k, v in item.items() if k in SpeechSegment.__dataclass_fields__}
@@ -107,8 +110,15 @@ async def synthesize_segments(data, audio_dir, tts, provider, *, attempts=2, con
                         digest = audio_digest(target)
                         os.replace(target, audio_dir / f"{chunk_id}.wav")
                     stat = (audio_dir / f"{chunk_id}.wav").stat()
+                    words = _word_count(item.get("source_text", ""))
+                    wpm = round(words / duration * 60, 1) if duration else 0
                     record.update(status="complete", duration_seconds=duration, sha256=digest,
-                                  size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
+                                  size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns,
+                                  word_count=words, measured_wpm=wpm)
+                    # Provider pace varies by voice and language. Keep the
+                    # measured value visible so editors can correct outliers
+                    # instead of silently accepting a drifting reading speed.
+                    record["pace_warning"] = bool(wpm and (wpm < 115 or wpm > 175))
                     record.pop("error", None)
                     persist()
                     return

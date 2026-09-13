@@ -30,6 +30,15 @@ def test_review_candidate_issue_and_approval_gate(client, db_session, tmp_path, 
     approved = client.post("/api/projects/book/review/decision", headers=headers,
                            json={"decision": "approved", "summary": "Reviewed PDF and audio"})
     assert approved.status_code == 200
+    assert approved.json()["approval_count"] == 1
+    assert db_session.query(Project).filter_by(name="book").one().status == "06_Pending_Second_Approval"
+    second = client.post("/api/signup", json={"username": "second-reviewer", "password": "pw"}).json()
+    db_session.query(Project).filter_by(name="book").one().assigned_to = second["user_id"]
+    db_session.commit()
+    approved_twice = client.post("/api/projects/book/review/decision",
+                                 headers={"Authorization": f"Bearer {second['token']}"},
+                                 json={"decision": "approved", "summary": "Independent second review"})
+    assert approved_twice.status_code == 200
     assert db_session.query(Project).filter_by(name="book").one().status == "06_Approved"
 
 

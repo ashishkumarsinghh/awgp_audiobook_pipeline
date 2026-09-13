@@ -13,12 +13,16 @@ class User(Base):
     full_name = Column(String, nullable=True)
     email = Column(String, nullable=True)
     phone = Column(String, nullable=True)
+    recording_type = Column(String, nullable=True)  # e.g. AI audiobook narration
+    language = Column(String, nullable=True)  # Hindi, Sanskrit, or bilingual
     allocation_status = Column(String, default="unregistered") # unregistered, pending, active
 
 class Project(Base):
     __tablename__ = 'projects'
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
+    display_name = Column(String, nullable=True)
+    book_identifier = Column(String, unique=True, index=True, nullable=True)
     status = Column(String, default='00_Starting', index=True)
     assigned_to = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     tts_provider = Column(String, default='edge')
