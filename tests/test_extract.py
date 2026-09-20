@@ -45,7 +45,7 @@ def test_empty_cloud_response_identifies_page(tmp_path):
     path = pdf_file(tmp_path, ["A"])
     client = MagicMock()
     client.models.generate_content.return_value.text = ""
-    with patch("src.extract.ocr_engine.get_gemini_client", return_value=client):
+    with patch("src.extract.ocr_engine.get_gemini_client", return_value=client), patch("time.sleep"):
         with pytest.raises(RuntimeError, match="page 1.*empty OCR"):
             extract_text_from_pdf(str(path))
 

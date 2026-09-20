@@ -59,13 +59,14 @@ def test_sandhi_splitting(pd):
     assert pd.apply("त्र्यम्बकं यजामहे", context="shloka") == "त्र्यम्बकम यजामहे"
     assert pd.apply("मृत्योर्मुक्षीय मामृतात्", context="shloka") == "म्रित्योर्मुक्षीय माम्रितात्"
 
-def test_hindi_schwa_deletion(pd):
-    # Test that the general hindi prose context appends halant to consonant clusters
-    # And terminal virama drops the virama first
-    # So 'धर्म' -> 'धर्म्'
-    assert pd.apply("धर्म", context="prose") == "धर्म्"
-    assert pd.apply("कर्म", context="prose") == "कर्म्"
-    assert pd.apply("महत्त्व", context="prose") == "महत्त्व्"
+def test_tatsama_clusters_preserve_clean_phonetics(pd):
+    # Test that standard Tatsama words with final clusters (e.g. 'धर्म', 'सत्य', 'मनुष्य')
+    # retain natural spelling without corrupting halants appended to codas
+    assert pd.apply("धर्म", context="prose") == "धर्म"
+    assert pd.apply("कर्म", context="prose") == "कर्म"
+    assert pd.apply("सत्य", context="prose") == "सत्य"
+    assert pd.apply("मनुष्य", context="prose") == "मनुष्य"
+
     
 def test_unicode_cleaning(pd):
     assert pd.apply("अ\u200Cत\u200Dः") == "अतह" # ZWNJ, ZWJ stripped

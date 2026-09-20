@@ -1,7 +1,10 @@
 """Page-by-page transcription with explicit failures instead of omitted pages."""
 from typing import Optional
 import os
+import re
+import json
 import time
+from datetime import datetime
 import fitz
 from dotenv import load_dotenv
 from google import genai
@@ -15,7 +18,13 @@ def get_gemini_client() -> Optional[genai.Client]:
     return genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60000)) if api_key else None
 
 
-def extract_text_from_pdf(pdf_path: str, max_pages: int = None) -> str:
+def extract_text_from_pdf(
+    pdf_path: str,
+    max_pages: Optional[int] = None,
+    checkpoint_dir: Optional[str] = None,
+    book_name: Optional[str] = None,
+    pages_to_process: Optional[List[int]] = None
+) -> str:
     if max_pages is not None and (type(max_pages) is not int or max_pages < 1):
         raise ValueError("max_pages must be a positive integer.")
     try:
@@ -27,17 +36,73 @@ def extract_text_from_pdf(pdf_path: str, max_pages: int = None) -> str:
             raise ValueError("Provide an unlocked PDF containing at least one page.")
         client = get_gemini_client()
         pages = []
-        limit = min(max_pages or len(doc), len(doc))
-        for index in range(limit):
+        clean_book = re.sub(r'[^a-zA-Z0-9_-]', '_', book_name or os.path.splitext(os.path.basename(pdf_path))[0])
+        if checkpoint_dir:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+
+        if pages_to_process:
+            page_indices = [p - 1 for p in pages_to_process if 1 <= p <= len(doc)]
+        else:
+            limit = min(max_pages or len(doc), len(doc))
+            page_indices = list(range(limit))
+
+        for index in page_indices:
+            page_num = index + 1
+            cached_text = None
+            page_file = None
+
+            if checkpoint_dir:
+                page_file = os.path.join(checkpoint_dir, f"{clean_book}_page_{page_num:04d}.txt")
+                if os.path.isfile(page_file):
+                    try:
+                        with open(page_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                            if content.strip():
+                                cached_text = content
+                    except Exception:
+                        pass
+
+            if cached_text is not None:
+                if "<blank_page>" not in cached_text:
+                    pages.append(cached_text)
+                continue
+
             page = doc.load_page(index)
             if client is None:
                 text = page.get_text().strip()
                 if not text:
-                    raise RuntimeError(f"Page {index + 1} has no embedded text. Set GEMINI_API_KEY for scanned-page OCR, then retry.")
+                    raise RuntimeError(f"Page {page_num} has no embedded text. Set GEMINI_API_KEY for scanned-page OCR, then retry.")
             else:
+                print(f"[Stage 0: OCR] Transcribing page {page_num}/{len(page_indices)} with Gemini Flash OCR...")
                 image = page.get_pixmap(dpi=200).tobytes("png")
-                text = _transcribe_page(client, image, index + 1)
-            pages.append(text)
+                text = _transcribe_page(client, image, page_num)
+                time.sleep(2.0)
+
+            if page_file:
+                try:
+                    with open(page_file, "w", encoding="utf-8") as f:
+                        f.write(text)
+                except Exception:
+                    pass
+
+            if "<blank_page>" in text:
+                print(f"[Stage 0: OCR] Page {page_num}: Excluded non-narrative metadata/blank page.")
+            else:
+                pages.append(text)
+
+        if checkpoint_dir:
+            manifest_path = os.path.join(checkpoint_dir, "ocr_manifest.json")
+            try:
+                with open(manifest_path, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "book_name": clean_book,
+                        "total_pages": len(page_indices),
+                        "completed_pages": len(pages),
+                        "timestamp": datetime.now().isoformat()
+                    }, f, indent=2)
+            except Exception:
+                pass
+
         return "\n\n".join(pages)
 
 
@@ -63,11 +128,16 @@ def _transcribe_page(client, img_bytes, page_number):
         "- Do not infer missing text from the previous or next page.\n\n"
 
         "### 2. EXCLUDE NON-CONTENT MATERIAL\n"
-        "Exclude page numbers, running headers/footers, publication names/dates, website URLs or "
-        "watermarks, decorative borders, ornamental typography, printer marks, copyright notices, "
+        "Exclude page numbers, running headers/footers, book title headers repeated on pages, "
+        "author/writer information (e.g., 'लेखक', 'पं० श्रीराम शर्मा आचार्य', '—श्रीराम शर्मा आचार्य'), "
+        "publisher/press metadata (e.g., 'प्रकाशक', 'युग निर्माण योजना', 'गायत्री तपोभूमि, मथुरा', "
+        "'मुद्रक', 'मूल्य', 'संस्करण'), publication names/dates, website URLs or watermarks, "
+        "decorative borders, ornamental typography, printer marks, copyright notices, "
         "advertisements, and other non-narrative publishing artifacts.\n"
-        "Examples include: '(३१)', '32', 'अखण्ड ज्योति', 'अखंडज्योति', "
-        "'Akhand Jyoti - May, 1948', 'awgp.org', 'akhandjyoti.org'.\n"
+        "Examples to EXCLUDE completely: '(३१)', '32', ') ( ५', 'मन साधे जीवन सधे ) ( १५', "
+        "'लेखक', 'प्रकाशक', 'अखण्ड ज्योति', 'अखंडज्योति', 'Akhand Jyoti - May, 1948', 'awgp.org', 'akhandjyoti.org'.\n"
+        "If a cover page, front matter, or title page contains only author name, publisher, address, "
+        "or publishing credits, treat the page as non-narrative metadata and output <blank_page></blank_page>.\n"
         "However, INCLUDE footnotes, source references, quotations, marginal explanations, or other "
         "text when they constitute meaningful literary/religious/academic content rather than publishing "
         "metadata.\n\n"
@@ -203,13 +273,18 @@ def _transcribe_page(client, img_bytes, page_number):
         "Do not output Markdown, code fences, XML declarations, JSON, explanations, confidence scores, "
         "OCR notes, page numbers, or introductory/concluding text.\n"
         "Use only these tags: <heading>, <subheading>, <shloka>, <gloss>, <prose>.\n"
+        "If the page contains no narrative, spiritual, philosophical, or literary content (for example, "
+        "if it contains ONLY excluded publishing metadata, addresses, URLs, printer credits, or is completely blank), "
+        "output exactly: <blank_page></blank_page>\n"
     )
 
 
-    for attempt in range(3):
+    model_name = os.environ.get("OCR_MODEL") or "gemini-3.6-flash"
+    max_attempts = 5
+    for attempt in range(max_attempts):
         try:
             response = client.models.generate_content(
-                model=os.environ.get("OCR_MODEL", "gemini-3.6-flash"),
+                model=model_name,
                 contents=[types.Part.from_bytes(data=img_bytes, mime_type="image/png"), prompt],
                 config=types.GenerateContentConfig(temperature=0.0))
             text = (response.text or "").strip()
@@ -217,7 +292,30 @@ def _transcribe_page(client, img_bytes, page_number):
                 raise ValueError("empty OCR response; inspect this page before proceeding")
             return text
         except Exception as exc:
-            if attempt < 2 and any(code in str(exc) for code in ("429", "500", "502", "503", "504")):
-                time.sleep(2 ** attempt)
+            err_str = str(exc)
+            if ("404" in err_str or "503" in err_str or "RESOURCE_EXHAUSTED" in err_str or "GenerateRequestsPerDay" in err_str) and model_name != "gemini-3.5-flash-lite":
+                print(f"  [ModelFallback] {model_name} quota exceeded or unavailable. Switching to gemini-3.5-flash-lite...")
+                model_name = "gemini-3.5-flash-lite"
+                continue
+            if attempt < max_attempts - 1 and any(code in err_str for code in ("429", "500", "502", "503", "504", "quota", "RESOURCE_EXHAUSTED", "empty OCR response")):
+                delay = 5 * (attempt + 1) if "empty OCR response" in err_str else 30
+                if "retry in " in err_str:
+                    try:
+                        match = re.search(r'retry in (\d+(?:\.\d+)?)s', err_str)
+                        if match:
+                            delay = float(match.group(1)) + 2.0
+                    except Exception:
+                        pass
+                elif "retryDelay" in err_str:
+                    try:
+                        match = re.search(r"retryDelay': '(\d+)s", err_str)
+                        if match:
+                            delay = int(match.group(1)) + 2.0
+                    except Exception:
+                        pass
+                elif "empty OCR response" not in err_str:
+                    delay = min(60, 15 * (attempt + 1))
+                print(f"  [Retry] Page {page_number}, attempt {attempt + 1}: {exc.__class__.__name__}. Waiting {int(delay)}s before retry...")
+                time.sleep(delay)
                 continue
             raise RuntimeError(f"OCR failed on page {page_number}: {exc}") from exc

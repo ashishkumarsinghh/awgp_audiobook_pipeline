@@ -2,6 +2,7 @@ import pytest
 import os
 import io
 import json
+import fitz
 from unittest.mock import patch
 from src.db.models import Project
 
@@ -17,7 +18,12 @@ def test_full_pipeline_e2e(client, auth_headers, db_session, tmp_path):
     api.PROJECTS_DIR = str(tmp_path)
     
     # 1. Create a Project
-    fake_pdf = io.BytesIO(b"fake pdf content")
+    fake_pdf = io.BytesIO()
+    with fitz.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((72, 72), "Synthetic E2E source")
+        pdf.save(fake_pdf)
+    fake_pdf.seek(0)
     res = client.post("/api/projects", data={"name": "e2e_book"}, files={"file": ("test.pdf", fake_pdf, "application/pdf")}, headers=auth_headers)
     assert res.status_code == 200
     

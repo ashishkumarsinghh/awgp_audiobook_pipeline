@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import pytest
 from src.synthesis.runner import synthesize_segments, load_manifest
+from src.synthesis.audio.io import validate_mp3
 from tests.test_pipeline import create_fake_wav
 
 
@@ -48,3 +49,10 @@ def test_failed_provider_cannot_complete(tmp_path, failure):
         asyncio.run(synthesize_segments([{"id": "c1", "source_text": "Text"}], tmp_path, Broken(), "fake", attempts=1))
     assert load_manifest(tmp_path)["chunks"]["c1"]["status"] == "failed"
     assert not (tmp_path / "c1.wav").exists()
+
+
+def test_invalid_master_mp3_is_rejected(tmp_path):
+    path = tmp_path / "master.mp3"
+    path.write_bytes(b"not an mp3")
+    with pytest.raises(ValueError, match="invalid MP3|audio stream"):
+        validate_mp3(path)

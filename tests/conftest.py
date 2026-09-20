@@ -9,6 +9,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ["DATABASE_URL"] = "sqlite:///:memory:"
+os.environ["JOB_WORKER_ENABLED"] = "0"
 
 from api import app, get_db
 from src.db.models import Base, User

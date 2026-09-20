@@ -8,11 +8,13 @@ from src.synthesis.audio.enhancer import AudioEnhancer
 
 
 class AudioAssembler:
-    def __init__(self, output_file):
+    def __init__(self, output_file, speed: float = 1.15, eq_profile: str = "smooth"):
         self.output_file = output_file
+        self.speed = speed
+        self.eq_profile = eq_profile
         self.work_dir = str(Path(output_file).parent)
 
-    def assemble(self, segments):
+    def assemble(self, segments, speed: float = None, eq_profile: str = None):
         if not segments:
             raise ValueError("No narration chunks to master. Generate audio first.")
         for segment in segments:
@@ -23,6 +25,8 @@ class AudioAssembler:
                 if type(pause) is not int or not 0 <= pause <= 30000:
                     raise ValueError("Pauses must be between 0 and 30000 milliseconds.")
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
+        target_speed = self.speed if speed is None else speed
+        target_eq = self.eq_profile if eq_profile is None else eq_profile
         with tempfile.TemporaryDirectory(prefix=".master-", dir=self.work_dir) as temporary:
             raw = Path(temporary) / "assembled.wav"
             output = Path(temporary) / "master.mp3"
@@ -36,7 +40,13 @@ class AudioAssembler:
                         while data := source.readframes(24000):
                             target.writeframes(data)
                     target.writeframes(bytes(segment.pause_after_ms * 24 * 2))
-            AudioEnhancer.apply_studio_mastering(str(raw), str(output), lossless=False)
+            AudioEnhancer.apply_studio_mastering(
+                str(raw),
+                str(output),
+                lossless=False,
+                speed=target_speed,
+                eq_profile=target_eq,
+            )
             if not output.is_file() or output.stat().st_size <= 0:
                 raise RuntimeError("Mastering did not produce an audio file.")
             os.replace(output, self.output_file)

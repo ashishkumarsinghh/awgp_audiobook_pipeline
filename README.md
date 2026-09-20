@@ -4,7 +4,10 @@ A local FastAPI + React workflow for transcribing Hindi/Sanskrit PDF books, revi
 
 ## Run locally
 
-Run commands from the repository root. Use one API worker; project locks are currently in-process.
+Run commands from the repository root. Stage execution is persisted in the
+database and claimed by a lease-based worker in each API process. Multiple
+workers can share the queue; SQLite remains best for local/small deployments,
+while PostgreSQL is recommended for concurrent production workers.
 
 ~~~sh
 python3 -m venv venv
@@ -35,14 +38,16 @@ Set these variables in a local .env (do not commit credentials):
 | --- | --- |
 | GEMINI_API_KEY | Remote scanned-page OCR. Without it, only embedded PDF text can be extracted. |
 | OCR_MODEL | Overrides the existing default gemini-3.6-flash. Confirm model availability for your account. |
-| TTS_PROVIDER | edge by default; gemini is the legacy name for the Google Cloud TTS adapter. |
-| TTS_VOICE | Optional provider-compatible voice; project settings take precedence in the API. |
+| SARVAM_API_KEY | Sarvam AI Bulbul TTS API key (for authentic Indian language voices). |
+| TTS_PROVIDER | edge by default; sarvam (Sarvam AI Bulbul v3); studio (Google AI Studio); google (Google Cloud Neural2/WaveNet). |
+| TTS_VOICE | Optional provider voice; defaults to shubh for sarvam, Kore for studio, Swara for edge/azure, hi-IN-Neural2-B for google. |
 | AZURE_SPEECH_KEY | Azure Speech subscription key (required only for Azure projects). |
 | AZURE_SPEECH_REGION | Azure Speech region, for example `centralindia` (required only for Azure projects). |
 | JWT_SECRET_KEY | Set a private random signing secret before sharing access to the API. |
 | DATABASE_URL | Defaults to sqlite:///./audiobook_pipeline.db; tests use isolated in-memory databases. |
+| JOB_WORKER_ENABLED | Enables the durable polling worker in each API process; defaults to `1`. |
 
-Edge requires network access. Google Cloud TTS requires the optional google-cloud-texttospeech package and Application Default Credentials; `GEMINI_API_KEY` alone does not configure it. Azure requires the Azure Speech SDK and `AZURE_SPEECH_KEY`/`AZURE_SPEECH_REGION`. The editor exposes a curated catalog of high-quality Hindi voices for Edge, Google and Azure; Sanskrit uses the selected Hindi voice with the project pronunciation profile. Failures are explicit and providers are never silently substituted.
+Sarvam AI TTS (`--provider sarvam`) uses `SARVAM_API_KEY` and the `bulbul:v3` model to generate highly authentic, natural native Indian language speech (voices: `shubh`, `ashutosh`, `advait`, `ritu`, `priya`, `roopa`). Google AI Studio TTS (`--provider studio`) uses `GEMINI_API_KEY` to generate 24 kHz audio via `gemini-3.1-flash-tts-preview` (`Kore`, `Charon`). Google Cloud TTS (`--provider google`) uses Application Default Credentials (`gcloud auth application-default login`) with high-fidelity Neural2 voices (`hi-IN-Neural2-B`, `hi-IN-Neural2-A`). Edge requires network access. Azure requires the Azure Speech SDK and `AZURE_SPEECH_KEY`/`AZURE_SPEECH_REGION`. The editor exposes a curated catalog of high-quality Hindi voices across providers. Failures are explicit and providers are never silently substituted.
 
 ## Review and produce a book
 
@@ -76,24 +81,77 @@ Saving changed source text invalidates downstream active artifacts. Identical sa
 
 Pre-manifest audio must be regenerated once. File size alone no longer establishes success. Retries reject corrupt/partial output and never fill missing narration with silence. Mastering requires every expected chunk in script order and publishes only after successful assembly. Both pause-before and pause-after values are honored. Polling uses fingerprints/file metadata; resume, chunk playback and mastering perform waveform/digest checks.
 
-Do not run CLI stages concurrently with API edits or multiple API workers against one project. Background jobs are in-process; after restart, rerun Audio to resume from its manifest.
+Stage requests create durable jobs. Workers claim one job per project using a
+database lease, renew the lease while running, and reclaim expired jobs after a
+worker crash. Repeating a failed stage queues it again and resumes from that
+stage using the existing validated artifacts and audio manifest. The API
+exposes `job_id` in stage responses, includes the latest job in project details,
+and provides `GET /api/projects/{project_name}/jobs/{job_id}` for polling.
 
-## CLI stage mapping
+You may run any individual stage (`1` OCR, `2` segmentation, `3` phonetics,
+`4` audio, or `5` mastering) or `all`; no earlier stage is implicitly rerun.
+Review or repair the relevant artifact, then submit that stage again. Do not
+edit the same project through the CLI while an API job is active.
 
-| Operation | CLI --stage | API /stage/ |
-| --- | --- | --- |
-| OCR | 0 | 1 |
-| Segmentation | 1 | 2 |
-| Phonetics | 2 | 3 |
-| Audio | 3 | 4 |
-| Mastering | 4 | 5 |
+## Minimal-verbosity CLI execution (`run.py`)
+
+Run commands directly from the root folder without long arguments or flags:
 
 ~~~sh
-python -m src.pipeline_v3 --project projects/my_book --stage 1
-python -m src.pipeline_v3 --project projects/my_book --all
+python run.py <book_name> <stage>
 ~~~
 
-Choose either --stage or --all. Place 00_scanned.pdf in the project directory before CLI OCR. For production, run stages individually and review text/pronunciation before synthesis.
+### Quick stage mapping
+
+| Stage | Command | Stage Subfolder | Input Picked | Output Saved | Human Edit Location |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **0** (OCR) | `python run.py my_book 0` | `00_ocr/` | `00_ocr/*.pdf` or `my_book.pdf` | `ocr_raw.txt` | `00_ocr/text_cleaned.txt` |
+| **1** (Segmentation) | `python run.py my_book 1` | `01_segments/` | `00_ocr/text_cleaned.txt` / `ocr_raw.txt` | `segments.json` | `01_segments/segments.json` |
+| **2** (Phonetics) | `python run.py my_book 2` | `02_phonetics/` | `01_segments/segments.json` | `phonetics.json` | `02_phonetics/phonetics.json` |
+| **3** (Audio) | `python run.py my_book 3` | `03_audio/` | `02_phonetics/phonetics.json` | `chunks/*.wav` + `manifest.json` | Resumes pending/edited |
+| **4** (Mastering) | `python run.py my_book 4` | `04_master/` | `02_phonetics/phonetics.json` + `03_audio/` | `mastered.mp3` | Master delivery audio |
+
+### Workflow: Edit in subfolders & resume
+
+Each stage automatically detects its input from the previous stage subfolder. All manual edits are made directly in the corresponding stage subfolder:
+
+~~~sh
+# 1. Run OCR (resumable per-page checkpoints in 00_ocr/checkpoints/):
+python run.py brahma_sandhya 0
+
+# 2. Review and edit text right in: projects/brahma_sandhya/00_ocr/text_cleaned.txt
+# Then run Segmentation (automatically picks up your edits from 00_ocr/):
+python run.py brahma_sandhya 1
+
+# 3. Review and edit segment chunk boundaries right in: projects/brahma_sandhya/01_segments/segments.json
+# Then run Phonetics (automatically picks up your edited segments):
+python run.py brahma_sandhya 2
+
+# 4. Review and edit pronunciation aliases & prosody in: projects/brahma_sandhya/02_phonetics/phonetics.json
+# Then run Audio (automatically resumes and synthesizes only missing or changed chunks):
+python run.py brahma_sandhya 3
+
+# 5. Run Mastering to produce the final audiobook:
+python run.py brahma_sandhya 4
+
+# Check project status at any time:
+python run.py brahma_sandhya
+
+# Or run all stages sequentially:
+python run.py brahma_sandhya all
+~~~
+
+### Artifact Naming & Resumability Structure
+
+Every project folder organizes active state, stage subfolders, checkpoints, and immutable historical archives:
+
+- **Stage Subfolders**: `00_ocr/`, `01_segments/`, `02_phonetics/`, `03_audio/`, `04_master/`.
+- **OCR Page Checkpoints (`00_ocr/checkpoints/`)**: Saves individual page transcriptions (`<book>_page_0001.txt`, `ocr_manifest.json`). If OCR is interrupted, rerunning Stage 0 resumes from the pending page without reprocessing completed pages.
+- **Historical Timestamped Artifacts (`artifacts/`)**: Every run archives a timestamped file with the book name:
+  `<book_name>_<stage_label>_<tag>_<YYYYMMDD_HHMMSS>.<ext>`
+  (e.g. `brahma_sandhya_00_ocr_raw_cli_20260917_195000.txt`, `brahma_sandhya_02_segments_cli_20260917_195100.json`).
+- **Granular Audio Resume (`03_audio/manifest.json`)**: Tracks chunk fingerprints and SHA-256 digests. If phonetics are modified for only a few chunks, running Stage 3 re-synthesizes *only* the changed chunks.
+- **Custom Flag Overrides**: Full compatibility flags (`--project`, `--stage`, `--input`, `--output`, `--voice`, `--provider`) remain available.
 
 ## Validation
 

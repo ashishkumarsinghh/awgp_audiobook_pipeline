@@ -36,6 +36,8 @@ class NarrationProfile:
     prosody_variation: str = "low"
     target_wpm: int = 145
     wpm_tolerance_percent: int = 18
+    mastering_speed: float = 1.15
+    eq_profile: str = "smooth"
 
 @dataclass
 class SpeechSegment:

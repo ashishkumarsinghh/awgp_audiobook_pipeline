@@ -152,7 +152,10 @@ def test_background_failure_visible_and_retryable(client, db_session, tmp_path, 
     assert detail["audio_progress"]["completed"] == 0
     assert len(detail["audio_progress"]["failed"]) == 2
     assert not api.project_lock("book").locked()
-    assert client.post("/api/projects/book/stage/5", headers=headers).status_code == 500
+    retry = client.post("/api/projects/book/stage/5", headers=headers)
+    assert retry.status_code == 200
+    assert retry.json()["job_id"]
+    assert client.get(f"/api/projects/book/jobs/{retry.json()['job_id']}", headers=headers).json()["status"] == "failed"
 
 
 def test_project_access_and_settings(client, db_session, tmp_path, monkeypatch):

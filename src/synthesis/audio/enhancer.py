@@ -1,6 +1,7 @@
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional, Dict
 from src.synthesis.audio.io import run_ffmpeg
 
 
@@ -48,6 +49,40 @@ class AudioEnhancer:
     TARGET_LRA = 6.0
     TRUE_PEAK = -1.5
 
+    EQ_PROFILES = {
+        "smooth": (
+            # Warm anti-fatigue equalizer profile based on calibrated user curve:
+            # 62Hz: +11dB, 125Hz: +11dB, 250Hz: +8dB, 500Hz: +3dB,
+            # 1kHz: -3dB, 2kHz: -6dB, 4kHz: -10dB, 8kHz: -12dB, 16kHz: -12dB.
+            # Uses linear zero-phase FIR equalizer to prevent phase distortion and smearing.
+            "highpass=f=55:p=2,"
+            "firequalizer=gain_entry='"
+            "entry(0, 10); "
+            "entry(62, 11); "
+            "entry(125, 11); "
+            "entry(250, 8); "
+            "entry(500, 3); "
+            "entry(1000, -3); "
+            "entry(2000, -6); "
+            "entry(4000, -10); "
+            "entry(8000, -12); "
+            "entry(16000, -12)"
+            "':zero_phase=on,"
+        ),
+        "balanced": (
+            # Subtle broadcast studio vocal enhancement
+            "highpass=f=65:p=2,"
+            "anequalizer="
+            "c0 f=110 w=90 g=0.8 t=0|"
+            "c0 f=250 w=120 g=-1.2 t=0|"
+            "c0 f=3200 w=1400 g=0.7 t=0|"
+            "c0 f=7800 w=3000 g=-0.8 t=0,"
+        ),
+        "flat": (
+            "highpass=f=50:p=2,"
+        ),
+    }
+
     @staticmethod
     def _run(cmd):
         run_ffmpeg(cmd[1:])
@@ -59,9 +94,11 @@ class AudioEnhancer:
         output_path: str,
         *,
         lossless: bool = False,
+        speed: float = 1.15,
+        eq_profile: str = "smooth",
     ):
         """
-        Apply audiobook-oriented mastering.
+        Apply audiobook-oriented mastering with warm anti-fatigue EQ and optional pitch-preserving tempo adjustment (default: 1.15x).
         """
 
         input_path = str(Path(input_path))
@@ -70,39 +107,38 @@ class AudioEnhancer:
         if not os.path.isfile(input_path):
             raise FileNotFoundError(input_path)
 
-        filter_complex = (
+        eq_filter = cls.EQ_PROFILES.get((eq_profile or "smooth").lower(), cls.EQ_PROFILES["smooth"])
+
+        filters = [
             "aresample=48000:resampler=soxr:precision=28,",
-            "highpass=f=65:p=2,",
-            (
-                "anequalizer="
-                "c0 f=110 w=90 g=0.8 t=0|"
-                "c0 f=250 w=120 g=-1.2 t=0|"
-                "c0 f=3200 w=1400 g=0.7 t=0|"
-                "c0 f=7800 w=3000 g=-0.8 t=0,"
-            ),
-            "deesser=i=0.25:m=0.5,",
+            eq_filter,
+            "deesser=i=0.30:m=0.5,",
             "acompressor="
-            "threshold=-20dB:"
-            "ratio=1.45:"
-            "attack=18:"
-            "release=140:"
+            "threshold=-21dB:"
+            "ratio=1.5:"
+            "attack=20:"
+            "release=160:"
             "makeup=1.0:"
-            "knee=2.5,",
+            "knee=2.8,",
             "asoftclip="
             "type=tanh:"
             "threshold=0.92:"
             "param=0.80,",
-            (
-                "loudnorm="
-                "I=-18:"
-                "LRA=6:"
-                "TP=-1.5:"
-                "dual_mono=true:"
-                "print_format=summary"
-            )
+        ]
+
+        if speed and float(speed) != 1.0:
+            filters.append(f"atempo={float(speed)},")
+
+        filters.append(
+            "loudnorm="
+            "I=-18:"
+            "LRA=6:"
+            "TP=-1.5:"
+            "dual_mono=true:"
+            "print_format=summary"
         )
 
-        filter_graph = "".join(filter_complex)
+        filter_graph = "".join(filters)
 
         if lossless:
             cmd = [
@@ -149,11 +185,16 @@ class AudioEnhancer:
         input_path: str,
         master_wav_path: str,
         delivery_mp3_path: str,
+        *,
+        eq_profile: str = "smooth",
+        speed: float = 1.15,
     ):
         cls.apply_studio_mastering(
             input_path=input_path,
             output_path=master_wav_path,
             lossless=True,
+            eq_profile=eq_profile,
+            speed=speed,
         )
 
         cls._encode_mp3(
@@ -186,3 +227,103 @@ class AudioEnhancer:
         ]
 
         AudioEnhancer._run(cmd)
+
+    @classmethod
+    def apply_speed(
+        cls,
+        input_path: str,
+        output_path: str,
+        speed: float = 1.15,
+        bitrate: str = "192k",
+    ):
+        """Applies pitch-preserving tempo adjustment to an existing audio file."""
+        input_path = str(Path(input_path))
+        output_path = str(Path(output_path))
+
+        if not os.path.isfile(input_path):
+            raise FileNotFoundError(input_path)
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_path,
+            "-filter:a",
+            f"atempo={float(speed)}",
+            "-ar",
+            str(cls.SAMPLE_RATE),
+            "-ac",
+            "1",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            bitrate,
+            "-id3v2_version",
+            "3",
+            output_path,
+        ]
+
+        cls._run(cmd)
+
+    @classmethod
+    def apply_metadata(
+        cls,
+        input_path: str,
+        output_path: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """
+        Writes standard ID3v2 metadata tags to an MP3 file losslessly (without re-encoding audio).
+        If output_path is omitted or identical to input_path, safely performs an in-place update.
+        """
+        input_path = str(Path(input_path))
+        dest_path = str(Path(output_path)) if output_path else input_path
+
+        if not os.path.isfile(input_path):
+            raise FileNotFoundError(f"Audio file not found for metadata tagging: {input_path}")
+
+        meta = metadata or {}
+        is_in_place = (os.path.abspath(input_path) == os.path.abspath(dest_path))
+        tmp_dest = dest_path if not is_in_place else dest_path + ".tmp.mp3"
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_path,
+            "-c",
+            "copy",
+        ]
+
+        tag_map = {
+            "title": "title",
+            "artist": "artist",
+            "album": "album",
+            "album_artist": "album_artist",
+            "date": "date",
+            "year": "date",
+            "genre": "genre",
+            "publisher": "publisher",
+            "comment": "comment",
+            "track": "track",
+            "disc": "disc",
+            "composer": "composer",
+        }
+
+        for key, val in meta.items():
+            if val is not None and str(val).strip():
+                tag_name = tag_map.get(key.lower(), key.lower())
+                cmd.extend(["-metadata", f"{tag_name}={str(val).strip()}"])
+
+        cmd.extend([
+            "-id3v2_version",
+            "3",
+            tmp_dest,
+        ])
+
+        cls._run(cmd)
+
+        if is_in_place:
+            os.replace(tmp_dest, dest_path)
+
+        return dest_path

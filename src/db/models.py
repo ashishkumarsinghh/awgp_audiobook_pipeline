@@ -27,6 +27,9 @@ class Project(Base):
     assigned_to = Column(Integer, ForeignKey('users.id'), nullable=True, index=True)
     tts_provider = Column(String, default='edge')
     tts_voice = Column(String, default='hi-IN-SwaraNeural')
+    # Database-backed lease owner for durable stage execution. This replaces
+    # process-local serialization when multiple API workers share the DB.
+    active_job_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -91,3 +94,23 @@ class ReviewDecision(Base):
     decision = Column(String, nullable=False)  # approved, changes_requested, saved
     summary = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now(), index=True)
+
+
+class Job(Base):
+    """Durable stage execution request with a reclaimable worker lease."""
+    __tablename__ = "jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    project_name = Column(String, ForeignKey("projects.name"), index=True, nullable=False)
+    stage = Column(String, nullable=False)
+    force = Column(Boolean, default=False, nullable=False)
+    status = Column(String, default="queued", index=True, nullable=False)  # queued, running, succeeded, failed
+    requested_by = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    worker_id = Column(String, nullable=True, index=True)
+    attempts = Column(Integer, default=0, nullable=False)
+    lease_until = Column(DateTime, nullable=True, index=True)
+    error = Column(Text, nullable=True)
+    result_status = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

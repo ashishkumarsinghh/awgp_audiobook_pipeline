@@ -3,6 +3,7 @@ from src.db.models import User, Project
 import os
 import io
 import json
+import fitz
 
 def test_signup_first_user_is_admin(client):
     res = client.post("/api/signup", json={"username": "admin1", "password": "password123"})
@@ -24,6 +25,18 @@ def test_signup_duplicate_username(client):
     res = client.post("/api/signup", json={"username": "testuser", "password": "pw2"})
     assert res.status_code == 400
     assert "Username taken" in res.json()["detail"]
+
+def test_signup_rejects_passwords_beyond_bcrypt_limit(client):
+    # bcrypt silently ignores bytes after 72; the API must not create an
+    # account whose effective password differs from what the user entered.
+    password = "a" * 73
+    res = client.post("/api/signup", json={"username": "longpw", "password": password})
+    assert res.status_code == 400
+    assert "72 UTF-8 bytes" in res.json()["detail"]
+
+def test_jwt_fallback_is_not_predictable():
+    import api
+    assert api.SECRET_KEY != "dev-secret-key-change-in-production"
 
 def test_login_success(client):
     client.post("/api/signup", json={"username": "testuser", "password": "pw"})
@@ -128,7 +141,13 @@ def test_create_project_and_get_details(client, tmp_path):
     
     try:
         headers = {"Authorization": f"Bearer {admin_token}"}
-        fake_pdf = io.BytesIO(b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\nxref\n0 1\n0000000000 65535 f \ntrailer<</Size 1/Root 1 0 R>>\nstartxref\n34\n%%EOF")
+        pdf_buffer = io.BytesIO()
+        with fitz.open() as pdf:
+            page = pdf.new_page()
+            page.insert_text((72, 72), "Synthetic test page")
+            pdf.save(pdf_buffer)
+        pdf_buffer.seek(0)
+        fake_pdf = pdf_buffer
         files = {"file": ("test.pdf", fake_pdf, "application/pdf")}
         data = {"name": "book_alpha"}
         
@@ -255,3 +274,126 @@ def test_audit_logs(client, tmp_path, db_session):
         assert len(logs) >= 2
     finally:
         api.PROJECTS_DIR = original_dir
+
+def test_signup_validation_rejects_invalid_inputs(client):
+    res1 = client.post("/api/signup", json={"username": "   ", "password": "pw"})
+    assert res1.status_code == 400
+    assert "Invalid username" in res1.json()["detail"]
+
+    res2 = client.post("/api/signup", json={"username": "validuser", "password": "   "})
+    assert res2.status_code == 400
+    assert "Password cannot be empty" in res2.json()["detail"]
+
+    res3 = client.post("/api/signup", json={"username": "invalid user!", "password": "pw"})
+    assert res3.status_code == 400
+    assert "Invalid username" in res3.json()["detail"]
+
+def test_create_project_rejects_empty_file(client, tmp_path):
+    admin_res = client.post("/api/signup", json={"username": "admin", "password": "pw"})
+    admin_token = admin_res.json()["token"]
+
+    import api
+    original_dir = api.PROJECTS_DIR
+    api.PROJECTS_DIR = str(tmp_path)
+    try:
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        empty_file = io.BytesIO(b"")
+        files = {"file": ("empty.pdf", empty_file, "application/pdf")}
+        res = client.post("/api/projects", data={"name": "empty_book"}, files=files, headers=headers)
+        assert res.status_code == 400
+        assert "Uploaded file is empty" in res.json()["detail"]
+    finally:
+        api.PROJECTS_DIR = original_dir
+
+def test_create_project_rejects_malformed_pdf(client, tmp_path):
+    admin_res = client.post("/api/signup", json={"username": "admin", "password": "pw"})
+    admin_token = admin_res.json()["token"]
+
+    import api
+    original_dir = api.PROJECTS_DIR
+    api.PROJECTS_DIR = str(tmp_path)
+    try:
+        response = client.post(
+            "/api/projects",
+            data={"name": "bad_book"},
+            files={"file": ("bad.pdf", io.BytesIO(b"not a pdf"), "application/pdf")},
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+        assert response.status_code == 422
+        assert "readable PDF" in response.json()["detail"]
+        assert not (tmp_path / "bad_book").exists()
+    finally:
+        api.PROJECTS_DIR = original_dir
+
+def test_restore_artifact_updates_project_status(client, tmp_path, db_session):
+    admin_res = client.post("/api/signup", json={"username": "admin", "password": "pw"})
+    admin_token = admin_res.json()["token"]
+
+    from src.db.models import Artifact
+    import api
+    original_dir = api.PROJECTS_DIR
+    api.PROJECTS_DIR = str(tmp_path)
+    try:
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        proj_name = "restore_book"
+        proj = Project(name=proj_name, status="05_Mastered")
+        db_session.add(proj)
+
+        proj_dir = tmp_path / proj_name
+        artifacts_dir = proj_dir / "artifacts"
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        (artifacts_dir / "cleaned_v1.txt").write_text("restored clean content", encoding="utf-8")
+
+        artifact_record = Artifact(
+            project_name=proj_name,
+            stage="01_text_cleaned",
+            filename="cleaned_v1.txt",
+            file_type="txt",
+            file_size=len("restored clean content")
+        )
+        db_session.add(artifact_record)
+        db_session.commit()
+
+        res = client.post(f"/api/projects/{proj_name}/artifacts/cleaned_v1.txt/restore", headers=headers)
+        assert res.status_code == 200
+
+        db_session.refresh(proj)
+        assert proj.status == "01_OCR_Done"
+    finally:
+        api.PROJECTS_DIR = original_dir
+
+def test_set_project_tts_provider_resets_downstream_status(client, tmp_path, db_session):
+    admin_res = client.post("/api/signup", json={"username": "admin", "password": "pw"})
+    admin_token = admin_res.json()["token"]
+
+    import api
+    original_dir = api.PROJECTS_DIR
+    api.PROJECTS_DIR = str(tmp_path)
+    try:
+        headers = {"Authorization": f"Bearer {admin_token}"}
+        proj_name = "tts_switch_book"
+        proj = Project(name=proj_name, status="04_Audio_Review", tts_provider="edge", tts_voice="hi-IN-SwaraNeural")
+        db_session.add(proj)
+        db_session.commit()
+
+        proj_dir = tmp_path / proj_name
+        proj_dir.mkdir(parents=True, exist_ok=True)
+
+        res = client.post(
+            f"/api/projects/{proj_name}/settings/tts-provider",
+            json={"provider": "edge", "voice": "hi-IN-MadhurNeural"},
+            headers=headers
+        )
+        assert res.status_code == 200
+
+        db_session.refresh(proj)
+        assert proj.tts_voice == "hi-IN-MadhurNeural"
+        assert proj.status == "03_Phonetics"
+    finally:
+        api.PROJECTS_DIR = original_dir
+
+def test_get_dictionary(client):
+    res = client.get("/api/dictionary")
+    assert res.status_code == 200
+    assert isinstance(res.json(), list)
+    assert len(res.json()) > 0

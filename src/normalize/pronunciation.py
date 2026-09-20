@@ -144,20 +144,14 @@ class PronunciationDictionary:
         text = re.sub(r'([ुू])ः(?=[\s।॥,?!*\'"”’]|$)', r'\1हु', text)
         # Preceded by any other char (inherent 'a', 'ā', 'e', 'ai') -> echo as 'h'
         text = re.sub(r'([^\sिीुू])ः(?=[\s।॥,?!*\'"”’]|$)', r'\1ह', text)
-        
-        # 2. Terminal Virama / Halant Rule
-        # Converts terminal virāmas on specific Sanskrit nominals and verbs (handled via exact_words lexical overrides above).
-        
-        # Generalized Schwa Deletion for Hindi Prose
-        # If context is not a Sanskrit chant, drop the trailing 'a' by adding a halant
-        if context not in ["shloka", "mantra"]:
-            C = r'[\u0915-\u0939]'
-            H = '\u094D'
-            M = r'[\u093E-\u094C\u094E-\u094F\u0900-\u0903]'
-            pattern = f'({C}{H}{C})(?!{M}|{C}|{H})'
-            text = re.sub(pattern, r'\g<1>' + H, text)
-            
+
+        # Note: Word-final consonant clusters in Tatsama words (e.g. सत्य, मनुष्य, धर्म, युद्ध, समाप्त)
+        # retain their inherent vocalic release in Hindi phonology. Appending viramas/halants to them
+        # corrupts the neural acoustic model's native G2P, causing acoustic clipping or stuttering.
+        # We preserve clean Devanagari orthography for natural neural synthesis.
+
         return text
+
 
     def apply_aliases(self, text: str, context: str = "general") -> str:
         # Legacy mapping for backwards compatibility with pipeline_v2.py

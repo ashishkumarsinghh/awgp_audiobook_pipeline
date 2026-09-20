@@ -47,3 +47,52 @@ def test_audio_assembler_lossless(tmp_path):
     with patch("src.synthesis.assembler.AudioEnhancer.apply_studio_mastering", side_effect=capture_master):
         assembler.assemble([seg1, seg2])
     assert open(output, "rb").read() == b"mastered"
+
+
+def test_audio_enhancer_eq_profiles(tmp_path):
+    from src.synthesis.audio.enhancer import AudioEnhancer
+    dummy_in = str(tmp_path / "in.wav")
+    dummy_out = str(tmp_path / "out.mp3")
+    create_fake_wav(dummy_in, 100)
+
+    captured_filters = []
+    def mock_run(cmd):
+        idx = cmd.index("-filter_complex")
+        captured_filters.append(cmd[idx + 1])
+
+    with patch.object(AudioEnhancer, "_run", side_effect=mock_run):
+        # Default smooth EQ: uses firequalizer with the user's calibrated curve
+        AudioEnhancer.apply_studio_mastering(dummy_in, dummy_out, eq_profile="smooth")
+        assert "firequalizer" in captured_filters[-1]
+        assert "entry(62, 11)" in captured_filters[-1]
+        assert "entry(16000, -12)" in captured_filters[-1]
+        assert "zero_phase=on" in captured_filters[-1]
+
+        # Balanced EQ: uses anequalizer
+        AudioEnhancer.apply_studio_mastering(dummy_in, dummy_out, eq_profile="balanced")
+        assert "anequalizer" in captured_filters[-1]
+
+        # Flat EQ: bypasses multi-band coloration
+        AudioEnhancer.apply_studio_mastering(dummy_in, dummy_out, eq_profile="flat")
+        assert "firequalizer" not in captured_filters[-1]
+        assert "anequalizer" not in captured_filters[-1]
+
+
+def test_audio_assembler_passes_eq_profile(tmp_path):
+    output = str(tmp_path / "master.mp3")
+    assembler = AudioAssembler(output, eq_profile="smooth")
+    w1 = str(tmp_path / "chunk.wav")
+    create_fake_wav(w1, 100)
+    seg = SpeechSegment(source_text="1", normalized_text="1", pronunciation_text="1")
+    seg.audio_file = w1
+
+    captured_kwargs = {}
+    def mock_master(src, dest, **kwargs):
+        captured_kwargs.update(kwargs)
+        with open(dest, "wb") as f:
+            f.write(b"mastered")
+
+    with patch("src.synthesis.assembler.AudioEnhancer.apply_studio_mastering", side_effect=mock_master):
+        assembler.assemble([seg], eq_profile="balanced")
+        assert captured_kwargs.get("eq_profile") == "balanced"
+

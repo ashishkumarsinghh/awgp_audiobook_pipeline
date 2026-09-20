@@ -1,6 +1,7 @@
 import os
 import re
 import json
+from contextlib import asynccontextmanager
 from threading import Lock
 from fastapi import Request
 from src.core.artifacts import atomic_write, write_json, validate_segments
@@ -23,14 +24,17 @@ import shutil
 import hashlib
 import uuid
 import unicodedata
+import secrets
 import bcrypt
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 
 from src.pipeline_v3 import ProjectManager
 from src.synthesis.providers import VOICE_CATALOG
+from src.synthesis.audio.io import validate_mp3
 from src.db.database import engine, Base, get_db
-from src.db.models import User, AuditLog, Project, Artifact, Candidate, ReviewIssue, ReviewDecision
+from src.db.models import User, AuditLog, Project, Artifact, Candidate, ReviewIssue, ReviewDecision, Job
+from src.job_runner import process_job, start_worker
 
 # Init DB
 Base.metadata.create_all(bind=engine)
@@ -45,8 +49,30 @@ with engine.begin() as _conn:
         _conn.execute(text("ALTER TABLE projects ADD COLUMN book_identifier VARCHAR"))
     if "display_name" not in _project_columns:
         _conn.execute(text("ALTER TABLE projects ADD COLUMN display_name VARCHAR"))
+    if "tts_provider" not in _project_columns:
+        _conn.execute(text("ALTER TABLE projects ADD COLUMN tts_provider VARCHAR DEFAULT 'edge'"))
+    if "tts_voice" not in _project_columns:
+        _conn.execute(text("ALTER TABLE projects ADD COLUMN tts_voice VARCHAR DEFAULT 'hi-IN-SwaraNeural'"))
+    if "active_job_id" not in _project_columns:
+        _conn.execute(text("ALTER TABLE projects ADD COLUMN active_job_id INTEGER"))
 
-app = FastAPI(title="AWGP Audiobook Pipeline API")
+_job_worker_thread = None
+_job_worker_stop = None
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    global _job_worker_thread, _job_worker_stop
+    enabled = os.environ.get("JOB_WORKER_ENABLED", "1").lower() not in {"0", "false", "no"}
+    _job_worker_thread, _job_worker_stop = start_worker(engine, _execute_queued_job, enabled=enabled)
+    try:
+        yield
+    finally:
+        if _job_worker_stop:
+            _job_worker_stop.set()
+
+
+app = FastAPI(title="AWGP Audiobook Pipeline API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -71,7 +97,10 @@ def _book_slug(title: str, db: Session) -> str:
         if not db.query(Project).filter(Project.name == slug).first() and not os.path.exists(os.path.join(PROJECTS_DIR, slug)):
             return slug
 
-SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "dev-secret-key-change-in-production")
+# Never use a predictable signing key.  A local fallback keeps development
+# convenient, but tokens intentionally become invalid after a process restart;
+# deployments must provide JWT_SECRET_KEY so all workers share one key.
+SECRET_KEY = os.environ.get("JWT_SECRET_KEY") or secrets.token_urlsafe(32)
 ALGORITHM = "HS256"
 security = HTTPBearer(auto_error=False)
 
@@ -137,7 +166,7 @@ def project_access(request: Request, db: Session = Depends(get_db),
     if os.path.commonpath([root, target]) != root:
         raise HTTPException(403, detail="Invalid project path")
     lock = project_lock(name)
-    mutation = request.method in {"POST", "PUT", "DELETE"}
+    mutation = request.method in {"POST", "PUT", "PATCH", "DELETE"}
     if mutation and "stage" not in request.path_params:
         if not lock.acquire(blocking=False):
             raise HTTPException(409, detail="A project operation is running. Wait before editing.")
@@ -199,6 +228,20 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
+def _validate_uploaded_pdf(path: str) -> None:
+    """Validate the uploaded bytes before creating durable project state."""
+    try:
+        with fitz.open(path) as document:
+            if document.needs_pass:
+                raise HTTPException(status_code=422, detail="Password-protected PDFs are not supported. Upload an unlocked PDF.")
+            if not document.is_pdf or len(document) == 0:
+                raise HTTPException(status_code=422, detail="The upload must be a readable PDF containing at least one page.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="The upload is not a readable PDF.") from exc
+
+
 class UserCreate(BaseModel):
     username: str
     password: str
@@ -209,13 +252,26 @@ class UserCreate(BaseModel):
     language: Optional[str] = None
 
 
+def _validate_password(password: str) -> None:
+    if not password or not password.strip():
+        raise HTTPException(status_code=400, detail="Password cannot be empty.")
+    # bcrypt only uses the first 72 bytes. Rejecting longer values avoids two
+    # distinct passwords authenticating as the same credential.
+    if len(password.encode("utf-8")) > 72:
+        raise HTTPException(status_code=400, detail="Password must be at most 72 UTF-8 bytes.")
+
+
 @app.post("/api/signup")
 def signup(user: UserCreate, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.username == user.username).first():
+    clean_username = (user.username or "").strip()
+    if not clean_username or not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", clean_username):
+        raise HTTPException(status_code=400, detail="Invalid username. Use 1-64 alphanumeric characters, underscores or dashes.")
+    _validate_password(user.password)
+    if db.query(User).filter(User.username == clean_username).first():
         raise HTTPException(status_code=400, detail="Username taken")
     hashed = bcrypt.hashpw(user.password.encode('utf-8'), bcrypt.gensalt())
     role = "admin" if db.query(User).count() == 0 else "editor"
-    new_user = User(username=user.username, password_hash=hashed.decode('utf-8'), role=role,
+    new_user = User(username=clean_username, password_hash=hashed.decode('utf-8'), role=role,
                     full_name=user.full_name, email=user.email, phone=user.phone,
                     recording_type=user.recording_type, language=user.language)
     db.add(new_user)
@@ -226,6 +282,7 @@ def signup(user: UserCreate, db: Session = Depends(get_db)):
 
 @app.post("/api/login")
 def login(user: UserCreate, db: Session = Depends(get_db)):
+    _validate_password(user.password)
     db_user = db.query(User).filter(User.username == user.username).first()
     if not db_user or not bcrypt.checkpw(user.password.encode('utf-8'), db_user.password_hash.encode('utf-8')):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -254,10 +311,12 @@ async def create_project(
     if file.content_type not in ["application/pdf", "application/x-pdf"]:
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
 
-    # Check file size (max 50MB)
+    # Check file size (max 50MB, min 1 byte)
     file.file.seek(0, 2)
     file_size = file.file.tell()
     file.file.seek(0)
+    if file_size <= 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
     if file_size > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File size must be less than 50MB")
 
@@ -271,6 +330,14 @@ async def create_project(
     pdf_path = os.path.join(project_dir, "00_scanned.pdf")
     with open(pdf_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
+
+    try:
+        _validate_uploaded_pdf(pdf_path)
+    except HTTPException:
+        # Do not leave an orphaned project directory when validation rejects
+        # the upload before its metadata is committed.
+        shutil.rmtree(project_dir, ignore_errors=True)
+        raise
 
     # Add to DB
     new_proj = Project(name=name, display_name=display_title, book_identifier=f"AWGP-{uuid.uuid4().hex[:12].upper()}", status="00_Starting")
@@ -460,7 +527,7 @@ def assign_project(
     db.commit()
     return {"status": "success"}
 
-def _get_project_artifacts(project_name: str, tts_provider=None, tts_voice=None) -> dict:
+def _get_project_artifacts(project_name: str, tts_provider=None, tts_voice=None, fast_mode=False) -> dict:
     p_dir = os.path.join(PROJECTS_DIR, project_name)
     has_pdf = os.path.exists(os.path.join(p_dir, "00_scanned.pdf"))
 
@@ -487,7 +554,11 @@ def _get_project_artifacts(project_name: str, tts_provider=None, tts_voice=None)
     has_seg = os.path.exists(os.path.join(p_dir, "03_segments.json"))
     has_phon = os.path.exists(os.path.join(p_dir, "04_phonetics.json"))
     has_audio = os.path.exists(os.path.join(p_dir, "05_audio_chunks")) and len(os.listdir(os.path.join(p_dir, "05_audio_chunks"))) > 0
-    has_master = os.path.exists(os.path.join(p_dir, "06_mastered.mp3"))
+    has_master = (
+        os.path.exists(os.path.join(p_dir, "04_master", f"{project_name}.mp3")) or
+        os.path.exists(os.path.join(p_dir, "04_master", "mastered.mp3")) or
+        os.path.exists(os.path.join(p_dir, "06_mastered.mp3"))
+    )
 
     total_chunks = 0
     completed_chunks = 0
@@ -496,19 +567,40 @@ def _get_project_artifacts(project_name: str, tts_provider=None, tts_voice=None)
     manifest = load_manifest(audio_dir := os.path.join(p_dir, "05_audio_chunks"))
     try:
         with open(os.path.join(p_dir, "04_phonetics.json"), encoding="utf-8") as stream:
-            data = validate_segments(json.load(stream))
+            data = json.load(stream)
+        if not isinstance(data, list):
+            data = []
         total_chunks = len(data)
         provider = tts_provider or manifest.get("provider", "edge")
         voice = tts_voice or manifest.get("voice", "hi-IN-MadhurNeural")
         records = manifest.get("chunks", {})
         for item in data:
+            if not isinstance(item, dict) or "id" not in item:
+                continue
             record = records.get(item["id"], {})
-            if is_current(item, record, audio_dir, provider, voice, verify_audio=False):
-                completed_chunks += 1
-                if record.get("pace_warning"):
-                    pace_warnings.append({"id": item["id"], "wpm": record.get("measured_wpm")})
-            elif record.get("status") == "failed":
-                failed_chunks.append({"id": item["id"], "error": record.get("error", "Synthesis failed")})
+
+            if fast_mode:
+                # The dashboard may skip fingerprinting, but must not report a
+                # deleted chunk as complete based only on manifest state.
+                chunk_path = os.path.join(audio_dir, f"{item['id']}.wav")
+                size_matches = (
+                    os.path.isfile(chunk_path)
+                    and record.get("size_bytes") is not None
+                    and os.path.getsize(chunk_path) == record.get("size_bytes")
+                )
+                if record.get("status") == "complete" and size_matches:
+                    completed_chunks += 1
+                    if record.get("pace_warning"):
+                        pace_warnings.append({"id": item["id"], "wpm": record.get("measured_wpm")})
+                elif record.get("status") == "failed":
+                    failed_chunks.append({"id": item["id"], "error": record.get("error", "Synthesis failed")})
+            else:
+                if is_current(item, record, audio_dir, provider, voice, verify_audio=False):
+                    completed_chunks += 1
+                    if record.get("pace_warning"):
+                        pace_warnings.append({"id": item["id"], "wpm": record.get("measured_wpm")})
+                elif record.get("status") == "failed":
+                    failed_chunks.append({"id": item["id"], "error": record.get("error", "Synthesis failed")})
     except (OSError, ValueError, TypeError, AttributeError):
         pass
     has_audio = total_chunks > 0 and completed_chunks == total_chunks
@@ -560,6 +652,30 @@ def list_projects(db: Session = Depends(get_db), current_user: User = Depends(ge
     # Editors see assigned projects, admins see all
     projects = projects_db if user.role == "admin" else [p for p in projects_db if p.assigned_to == user.id]
 
+    assigned_user_ids = {p.assigned_to for p in projects if p.assigned_to}
+    users_by_id = {}
+    if assigned_user_ids:
+        users_by_id = {u.id: u for u in db.query(User).filter(User.id.in_(assigned_user_ids)).all()}
+
+    project_names = [p.name for p in projects]
+    issue_counts_map = {}
+    if project_names:
+        from sqlalchemy import func
+        issue_rows = db.query(
+            ReviewIssue.project_name,
+            ReviewIssue.severity,
+            func.count(ReviewIssue.id)
+        ).filter(
+            ReviewIssue.project_name.in_(project_names),
+            ReviewIssue.status.in_(["open", "reopened"])
+        ).group_by(ReviewIssue.project_name, ReviewIssue.severity).all()
+        for p_name, sev, cnt in issue_rows:
+            if p_name not in issue_counts_map:
+                issue_counts_map[p_name] = {"total": 0, "blocker": 0}
+            issue_counts_map[p_name]["total"] += cnt
+            if sev == "blocker":
+                issue_counts_map[p_name]["blocker"] += cnt
+
     result = []
     stage_counts = {}
     failed_chunks = 0
@@ -567,18 +683,15 @@ def list_projects(db: Session = Depends(get_db), current_user: User = Depends(ge
     open_blockers = 0
     open_issues = 0
     for p in projects:
-        artifacts = _get_project_artifacts(p.name, p.tts_provider, p.tts_voice)
+        artifacts = _get_project_artifacts(p.name, p.tts_provider, p.tts_voice, fast_mode=True)
         stage = _effective_stage(p.status, artifacts)
         stage_counts[stage] = stage_counts.get(stage, 0) + 1
         failed_chunks += len(artifacts.get("audio_progress", {}).get("failed", []))
         pace_warnings += len(artifacts.get("audio_progress", {}).get("pace_warnings", []))
-        open_query = db.query(ReviewIssue).filter(
-            ReviewIssue.project_name == p.name,
-            ReviewIssue.status.in_(["open", "reopened"]),
-        )
-        open_issues += open_query.count()
-        open_blockers += open_query.filter(ReviewIssue.severity == "blocker").count()
-        assigned_user = db.query(User).filter(User.id == p.assigned_to).first() if p.assigned_to else None
+        counts = issue_counts_map.get(p.name, {"total": 0, "blocker": 0})
+        open_issues += counts["total"]
+        open_blockers += counts["blocker"]
+        assigned_user = users_by_id.get(p.assigned_to) if p.assigned_to else None
         result.append({
             "id": p.id,
             "name": p.name,
@@ -614,6 +727,9 @@ def list_projects(db: Session = Depends(get_db), current_user: User = Depends(ge
 
 @app.get("/api/projects/{name}")
 def get_project_details(name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # A long-lived test/client session may retain an ORM identity that a
+    # worker updated in another session. Refresh before reporting job state.
+    db.expire_all()
     p = db.query(Project).filter(Project.name == name).first()
     if not p:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -621,6 +737,22 @@ def get_project_details(name: str, db: Session = Depends(get_db), current_user: 
     artifacts = _get_project_artifacts(name, p.tts_provider, p.tts_voice)
     stage = _effective_stage(p.status, artifacts)
     assigned_user = db.query(User).filter(User.id == p.assigned_to).first() if p.assigned_to else None
+    latest_job = db.query(Job).filter(Job.project_name == name).order_by(Job.created_at.desc(), Job.id.desc()).first()
+
+    job_payload = None
+    if latest_job:
+        job_payload = {
+            "id": latest_job.id,
+            "stage": latest_job.stage,
+            "status": latest_job.status,
+            "force": latest_job.force,
+            "attempts": latest_job.attempts,
+            "error": latest_job.error,
+            "result_status": latest_job.result_status,
+            "created_at": latest_job.created_at.isoformat() if latest_job.created_at else None,
+            "started_at": latest_job.started_at.isoformat() if latest_job.started_at else None,
+            "finished_at": latest_job.finished_at.isoformat() if latest_job.finished_at else None,
+        }
 
     return {
         "id": p.id,
@@ -634,14 +766,37 @@ def get_project_details(name: str, db: Session = Depends(get_db), current_user: 
         "assigned_username": assigned_user.username if assigned_user else "Unassigned",
         "is_assigned_to_me": (p.assigned_to == current_user.id),
         "created_at": p.created_at.isoformat() if p.created_at else None,
+        "job": job_payload,
         "artifacts": artifacts,
         **artifacts
     }
 
+
+@app.get("/api/projects/{project_name}/jobs/{job_id}")
+def get_job_status(project_name: str, job_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    job = db.query(Job).filter(Job.id == job_id, Job.project_name == project_name).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "id": job.id,
+        "project_name": job.project_name,
+        "stage": job.stage,
+        "status": job.status,
+        "force": job.force,
+        "attempts": job.attempts,
+        "worker_id": job.worker_id if current_user.role == "admin" else None,
+        "error": job.error,
+        "result_status": job.result_status,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+    }
+
 @app.get("/api/projects/{project_name}/pdf")
 def get_pdf(project_name: str, token: Optional[str] = Query(None), current_user: User = Depends(get_current_user)):
-    file_path = os.path.abspath(os.path.join(PROJECTS_DIR, project_name, "00_scanned.pdf"))
-    if not file_path.startswith(os.path.abspath(PROJECTS_DIR)):
+    root = os.path.realpath(PROJECTS_DIR)
+    file_path = os.path.realpath(os.path.join(root, project_name, "00_scanned.pdf"))
+    if os.path.commonpath([root, file_path]) != root:
         raise HTTPException(status_code=403, detail="Invalid file path")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="PDF file not found")
@@ -736,10 +891,7 @@ def get_segments(project_name: str, current_user: User = Depends(get_current_use
 @app.put("/api/projects/{project_name}/segments")
 def update_segments(project_name: str, updates: List[Dict[str, Any]], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     pm = ProjectManager(os.path.join(PROJECTS_DIR, project_name))
-
     target_file = pm.segments_file
-    if not os.path.exists(target_file):
-        target_file = pm.segments_file
 
     try:
         validate_segments(updates)
@@ -789,122 +941,120 @@ def update_phonetics(project_name: str, updates: List[Dict[str, Any]], db: Sessi
     db.commit()
     return {"status": "success"}
 
-@app.post("/api/projects/{project_name}/stage/{stage}")
-def run_stage(project_name: str, stage: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # Validate stage (1-5)
-    if stage not in [1, 2, 3, 4, 5]:
-        raise HTTPException(status_code=400, detail="Invalid stage. Allowed: 1 (OCR), 2 (Segmentation), 3 (Phonetics), 4 (Audio), 5 (Mastering)")
+def _run_queued_stage(stage_num: str, stage_db: Session, project_name: str, pm: ProjectManager,
+                      actor_id: int, actor_name: str, force: bool) -> str:
+    if stage_num == "1":
+        pm.run_stage_1_ocr()
+        save_artifact_record(stage_db, project_name, "00_ocr_raw", "txt", pm.raw_file, actor_name, actor_id)
+        return "01_OCR_Done"
+    if stage_num == "2":
+        pm.run_stage_1_segmentation(force=force)
+        save_artifact_record(stage_db, project_name, "02_segments", "json", pm.segments_file, actor_name, actor_id)
+        return "02_Segmentation"
+    if stage_num == "3":
+        pm.run_stage_2_phonetics(force=force)
+        save_artifact_record(stage_db, project_name, "03_phonetics", "json", pm.phonetics_file, actor_name, actor_id)
+        return "03_Phonetics"
+    if stage_num == "4":
+        pm.run_stage_3_audio()
+        save_artifact_record(stage_db, project_name, "04_audio_synthesis", "json", pm.phonetics_file, actor_name, actor_id)
+        return "04_Audio_Review"
+    if stage_num == "5":
+        pm.run_stage_4_mastering(force=force)
+        artifact_name = save_artifact_record(stage_db, project_name, "05_mastered", "mp3", pm.master_file, actor_name, actor_id)
+        digest = _sha256_file(pm.master_file)
+        existing = stage_db.query(Candidate).filter(Candidate.project_name == project_name, Candidate.sha256 == digest).first()
+        if existing:
+            existing.artifact_filename = artifact_name or existing.artifact_filename
+        else:
+            stage_db.query(Candidate).filter(
+                Candidate.project_name == project_name, Candidate.status == "pending_review"
+            ).update({"status": "superseded"})
+            stage_db.add(Candidate(
+                project_name=project_name,
+                artifact_filename=artifact_name or os.path.basename(pm.master_file),
+                sha256=digest,
+                status="pending_review",
+                source_status="05_Mastered",
+                created_by=actor_id,
+            ))
+        return "05_Mastered"
+    raise ValueError(f"Unsupported stage: {stage_num}")
 
-    # Validate project name format
-    if not re.match(r'^[a-zA-Z0-9_-]{1,64}$', project_name):
-        raise HTTPException(status_code=400, detail="Invalid project name")
 
-    proj = db.query(Project).filter(Project.name == project_name).first()
-    tts_provider = proj.tts_provider if proj else None
-    tts_voice = proj.tts_voice if proj else None
-
-    pm = ProjectManager(os.path.join(PROJECTS_DIR, project_name), tts_provider, tts_voice)
-
-    actor_id, actor_name = current_user.id, current_user.username
-    database_bind = db.get_bind()
-
-    def _execute_stage():
-        if stage == 1:
-            pm.run_stage_1_ocr()
-            save_artifact_record(db, project_name, "00_ocr_raw", "txt", pm.raw_file, current_user.username, current_user.id)
-            return "01_OCR_Done"
-        elif stage == 2:
-            pm.run_stage_1_segmentation()
-            save_artifact_record(db, project_name, "02_segments", "json", pm.segments_file, current_user.username, current_user.id)
-            return "02_Segmentation"
-        elif stage == 3:
-            pm.run_stage_2_phonetics()
-            save_artifact_record(db, project_name, "03_phonetics", "json", pm.phonetics_file, current_user.username, current_user.id)
-            return "03_Phonetics"
-        elif stage == 4:
-            pm.run_stage_3_audio()
-            return "04_Audio_Review"
-        elif stage == 5:
-            pm.run_stage_4_mastering()
-            artifact_name = save_artifact_record(db, project_name, "05_mastered", "mp3", pm.master_file, current_user.username, current_user.id)
-            digest = _sha256_file(pm.master_file)
-            existing = db.query(Candidate).filter(Candidate.project_name == project_name,
-                                                   Candidate.sha256 == digest).first()
-            if existing:
-                existing.artifact_filename = artifact_name or existing.artifact_filename
-            else:
-                db.query(Candidate).filter(Candidate.project_name == project_name,
-                                           Candidate.status == "pending_review").update({"status": "superseded"})
-                db.add(Candidate(project_name=project_name,
-                                 artifact_filename=artifact_name or os.path.basename(pm.master_file),
-                                 sha256=digest, status="pending_review",
-                                 source_status="05_Mastered", created_by=current_user.id))
-            return "05_Mastered"
-
-    lock = project_lock(project_name)
-    if not lock.acquire(blocking=False):
-        raise HTTPException(409, detail="A project operation is already running.")
-
-    # Fast synchronous stages: 1 (OCR), 2 (segmentation), 3 (phonetics), 5 (mastering)
-    if stage in [1, 2, 3, 5]:
+def _execute_queued_job(job_id: int, database_bind) -> str:
+    """Execute one claimed job using only fresh, worker-owned DB state."""
+    with Session(database_bind) as db:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            raise ValueError(f"Job {job_id} not found")
+        project = db.query(Project).filter(Project.name == job.project_name).first()
+        actor = db.query(User).filter(User.id == job.requested_by).first() if job.requested_by else None
+        if not project:
+            raise ValueError("Project no longer exists")
+        actor_id = actor.id if actor else None
+        actor_name = actor.username if actor else "system"
+        pm = ProjectManager(os.path.join(PROJECTS_DIR, job.project_name), project.tts_provider, project.tts_voice)
+        stages = ["1", "2", "3", "4", "5"] if job.stage == "all" else [job.stage]
+        final_status = project.status
         try:
-            status_val = _execute_stage()
-            proj = db.query(Project).filter(Project.name == project_name).first()
-            if proj:
-                proj.status = status_val
-                log = AuditLog(project_name=project_name, stage=status_val, action=f"STAGE {stage} COMPLETED", user_id=current_user.id)
-                db.add(log)
+            for stage_num in stages:
+                final_status = _run_queued_stage(stage_num, db, job.project_name, pm, actor_id, actor_name, job.force)
+                project.status = final_status
+                db.add(AuditLog(
+                    project_name=job.project_name,
+                    stage=final_status,
+                    action=f"STAGE {stage_num} COMPLETED" if job.stage != "all" else f"STAGE {stage_num} COMPLETED IN ALL JOB",
+                    user_id=actor_id,
+                ))
                 db.commit()
-            return {"status": "success", "stage": stage, "new_status": status_val}
-        except (ValueError, FileNotFoundError) as e:
-            raise HTTPException(status_code=422, detail=str(e))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-        finally:
-            lock.release()
-    else:
-        try:
-            # Stage 4: Audio synthesis runs asynchronously in background
-            proj = db.query(Project).filter(Project.name == project_name).first()
-            if proj:
-                proj.status = "04_Synthesizing"
-                log = AuditLog(project_name=project_name, stage="04_Synthesizing", action="AUDIO SYNTHESIS STARTED", user_id=current_user.id)
-                db.add(log)
-                db.commit()
-        except Exception:
-            lock.release()
+            return final_status
+        except Exception as exc:
+            project.status = "03_Phonetics" if job.stage in ("4", "5", "all") else project.status
+            db.add(AuditLog(project_name=job.project_name, stage=project.status, action="JOB FAILED", details=str(exc), user_id=actor_id))
+            db.commit()
             raise
 
-        def _bg():
-            try:
-                pm.run_stage_3_audio()
-                status_val = "04_Audio_Review"
-                with Session(database_bind) as session:
-                    p = session.query(Project).filter(Project.name == project_name).first()
-                    if p:
-                        p.status = status_val
-                        session.add(AuditLog(project_name=project_name, stage=status_val, action="AUDIO GENERATED", user_id=actor_id))
-                        save_artifact_record(session, project_name, "04_audio_synthesis", "json", pm.phonetics_file, actor_name, actor_id)
-                        session.commit()
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                print(f"Background stage 4 error: {e}")
-                try:
-                    with Session(database_bind) as session:
-                        p = session.query(Project).filter(Project.name == project_name).first()
-                        if p:
-                            p.status = "03_Phonetics"
-                            session.add(AuditLog(project_name=project_name, stage="03_Phonetics", action="AUDIO FAILED", details=str(e), user_id=actor_id))
-                            session.commit()
-                except Exception as db_err:
-                    print(f"Failed to update error status in DB: {db_err}")
 
-            finally:
-                lock.release()
+@app.post("/api/projects/{project_name}/stage/{stage}")
+def run_stage(project_name: str, stage: str, background_tasks: BackgroundTasks, force: bool = False,
+              db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if stage not in ["1", "2", "3", "4", "5", "all"]:
+        raise HTTPException(status_code=400, detail="Invalid stage. Allowed: 1, 2, 3, 4, 5, or 'all'")
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", project_name):
+        raise HTTPException(status_code=400, detail="Invalid project name")
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-        background_tasks.add_task(_bg)
-        return {"status": "success", "stage": stage, "async": True, "new_status": "04_Synthesizing", "message": "Audio generation started in background"}
+    active = db.query(Job).filter(
+        Job.project_name == project_name,
+        Job.status.in_(["queued", "running"]),
+    ).order_by(Job.created_at.desc()).first()
+    if active:
+        return {
+            "status": "success", "stage": active.stage, "job_id": active.id,
+            "job_status": active.status, "new_status": project.status,
+            "message": "A job for this project is already queued or running.",
+        }
+
+    job = Job(project_name=project_name, stage=stage, force=force, requested_by=current_user.id, status="queued")
+    db.add(job)
+    if stage in ("4", "all"):
+        project.status = "04_Synthesizing"
+    db.add(AuditLog(project_name=project_name, stage=project.status, action=f"JOB {stage} QUEUED", user_id=current_user.id))
+    db.commit()
+    db.refresh(job)
+    database_bind = db.get_bind()
+    # FastAPI executes this after the response. The durable worker started at
+    # startup independently polls the same table, so a crash before this task
+    # runs is recoverable after restart.
+    background_tasks.add_task(process_job, database_bind, _execute_queued_job, job.id)
+    return {
+        "status": "success", "stage": stage, "job_id": job.id,
+        "job_status": "queued", "async": True, "new_status": project.status,
+        "message": "Stage queued. Poll project details or the job endpoint for completion.",
+    }
 
 @app.get("/api/projects/{project_name}/audio/{chunk_id}")
 def get_audio(project_name: str, chunk_id: str, token: Optional[str] = Query(None),
@@ -923,12 +1073,20 @@ def get_audio(project_name: str, chunk_id: str, token: Optional[str] = Query(Non
 
 @app.get("/api/projects/{project_name}/mastered")
 def get_mastered_audio(project_name: str, token: Optional[str] = Query(None), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    file_path = os.path.join(PROJECTS_DIR, project_name, "06_mastered.mp3")
+    file_path = os.path.join(PROJECTS_DIR, project_name, "04_master", f"{project_name}.mp3")
+    if not os.path.exists(file_path):
+        file_path = os.path.join(PROJECTS_DIR, project_name, "04_master", "mastered.mp3")
+    if not os.path.exists(file_path):
+        file_path = os.path.join(PROJECTS_DIR, project_name, "06_mastered.mp3")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Mastered audio not found")
     project = db.query(Project).filter(Project.name == project_name).first()
     if not _get_project_artifacts(project_name, project.tts_provider, project.tts_voice)["has_mastered"]:
         raise HTTPException(409, detail="This master is outdated or unverified. Run Audio and Mastering again.")
+    try:
+        validate_mp3(file_path)
+    except ValueError as exc:
+        raise HTTPException(409, detail=f"Mastered audio failed integrity validation: {exc}") from exc
     now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     download_filename = f"{project_name}_mastered_{current_user.username}_{now_str}.mp3"
     return FileResponse(file_path, media_type="audio/mpeg", filename=download_filename)
@@ -953,8 +1111,9 @@ def list_artifacts(project_name: str, db: Session = Depends(get_db), current_use
 @app.get("/api/projects/{project_name}/artifacts/{filename}")
 def download_artifact(project_name: str, filename: str, token: Optional[str] = Query(None), current_user: User = Depends(get_current_user)):
     safe_name = os.path.basename(filename)
-    file_path = os.path.abspath(os.path.join(PROJECTS_DIR, project_name, "artifacts", safe_name))
-    if not file_path.startswith(os.path.abspath(PROJECTS_DIR)):
+    root = os.path.realpath(PROJECTS_DIR)
+    file_path = os.path.realpath(os.path.join(root, project_name, "artifacts", safe_name))
+    if os.path.commonpath([root, file_path]) != root:
         raise HTTPException(status_code=403, detail="Invalid file path")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Artifact file not found")
@@ -972,8 +1131,9 @@ def restore_artifact(project_name: str, filename: str, db: Session = Depends(get
     record = db.query(Artifact).filter(Artifact.project_name == project_name, Artifact.filename == os.path.basename(filename)).first()
     if not record or record.file_type not in ("txt", "json"):
         raise HTTPException(404, detail="Only text and JSON artifacts can be restored")
-    source = os.path.abspath(os.path.join(PROJECTS_DIR, project_name, "artifacts", record.filename))
-    if not os.path.isfile(source):
+    root = os.path.realpath(PROJECTS_DIR)
+    source = os.path.realpath(os.path.join(root, project_name, "artifacts", record.filename))
+    if os.path.commonpath([root, source]) != root or not os.path.isfile(source):
         raise HTTPException(404, detail="Artifact file not found")
     target_name = {"00_ocr_raw": "01_ocr_raw.txt", "01_text_cleaned": "02_text_cleaned.txt",
                    "02_segments": "03_segments.json", "03_phonetics": "04_phonetics.json"}.get(record.stage)
@@ -983,6 +1143,17 @@ def restore_artifact(project_name: str, filename: str, db: Session = Depends(get
     shutil.copyfile(source, target)
     pm = ProjectManager(os.path.join(PROJECTS_DIR, project_name))
     pm.invalidate_after({"00_ocr_raw": "raw", "01_text_cleaned": "clean", "02_segments": "segments", "03_phonetics": "phonetics"}[record.stage])
+
+    stage_status_map = {
+        "00_ocr_raw": "01_OCR_Done",
+        "01_text_cleaned": "01_OCR_Done",
+        "02_segments": "02_Segmentation",
+        "03_phonetics": "03_Phonetics",
+    }
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if project and record.stage in stage_status_map:
+        project.status = stage_status_map[record.stage]
+
     db.add(AuditLog(project_name=project_name, stage=record.stage, action="RESTORED ARTIFACT AS DRAFT",
                     details=record.filename, user_id=current_user.id))
     db.commit()
@@ -1026,7 +1197,10 @@ def get_review_audio(project_name: str, db: Session = Depends(get_db), current_u
                                            Candidate.status != "superseded").order_by(Candidate.created_at.desc()).first()
     if not candidate:
         raise HTTPException(404, detail="No review candidate exists")
-    file_path = os.path.abspath(os.path.join(PROJECTS_DIR, project_name, "artifacts", candidate.artifact_filename))
+    artifact_root = os.path.realpath(os.path.join(PROJECTS_DIR, project_name, "artifacts"))
+    file_path = os.path.realpath(os.path.join(artifact_root, candidate.artifact_filename))
+    if os.path.commonpath([artifact_root, file_path]) != artifact_root:
+        raise HTTPException(403, detail="Invalid candidate artifact path")
     if not os.path.isfile(file_path):
         raise HTTPException(409, detail="Candidate artifact is missing; restore it before reviewing")
     if _sha256_file(file_path) != candidate.sha256:
@@ -1126,12 +1300,14 @@ def set_project_tts_provider(project_name: str, req: TTSProviderRequest, db: Ses
     proj.tts_provider = normalized_provider
     proj.tts_voice = _validate_tts_selection(normalized_provider, req.voice)
     ProjectManager(os.path.join(PROJECTS_DIR, project_name)).invalidate_after("phonetics")
+    if proj.status in ("04_Synthesizing", "04_Audio_Review", "05_Mastered"):
+        proj.status = "03_Phonetics"
     db.commit()
     return {"status": "success", "provider": proj.tts_provider, "voice": proj.tts_voice}
 
 @app.get("/api/dictionary")
 def get_dictionary():
-    dict_path = "configs/pronunciation.json"
+    dict_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "pronunciation.json")
     if os.path.exists(dict_path):
         with open(dict_path, "r", encoding="utf-8") as f:
             return json.load(f)

@@ -48,6 +48,7 @@ function ProjectPipeline() {
   const [reviewSeverity, setReviewSeverity] = useState('major')
   const [ttsProvider, setTtsProvider] = useState('edge')
   const [ttsVoice, setTtsVoice] = useState('hi-IN-SwaraNeural')
+  const [forceRecompute, setForceRecompute] = useState(false)
   const finalAudioRef = useRef(null)
   const [reviewTimestamp, setReviewTimestamp] = useState(0)
   const restoreArtifactMutation = useMutation({
@@ -77,18 +78,22 @@ function ProjectPipeline() {
     },
     refetchInterval: (query) => {
       const d = query?.state?.data
-      if (d?.status === '04_Synthesizing') return 1500
+      if (d?.status === '04_Synthesizing' || ['queued', 'running'].includes(d?.job?.status)) return 1500
       return false
     }
   })
 
-  const { data: voiceCatalog = { voices: [] } } = useQuery({
+  const { data: voiceCatalogData } = useQuery({
     queryKey: ['ttsVoices'], queryFn: async () => {
       const res = await fetch(`${API_BASE}/api/tts/voices`, { headers: { 'Authorization': `Bearer ${user.token}` } })
       if (!res.ok) throw new Error('Failed to load voices')
       return res.json()
     }
   })
+  // Keep the editor usable while the catalog is loading or if an older API
+  // returns an unexpected payload. The provider selector must not crash the
+  // entire pipeline view on a non-critical settings response.
+  const voiceCatalog = { voices: Array.isArray(voiceCatalogData?.voices) ? voiceCatalogData.voices : [] }
   const { data: ttsSettings } = useQuery({
     queryKey: ['ttsSettings', project], queryFn: async () => {
       const res = await fetch(`${API_BASE}/api/projects/${project}/settings/tts-provider`, { headers: { 'Authorization': `Bearer ${user.token}` } })
@@ -327,7 +332,8 @@ function ProjectPipeline() {
         if (localPhonetics.length > 0) await savePhoneticsMutation.mutateAsync(localPhonetics)
       }
 
-      const res = await fetch(`${API_BASE}/api/projects/${project}/stage/${stageNum + 1}`, {
+      const endpoint_stage = stageNum === 'all' ? 'all' : stageNum + 1;
+      const res = await fetch(`${API_BASE}/api/projects/${project}/stage/${endpoint_stage}${forceRecompute ? '?force=true' : ''}`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${user.token}` }
       })
@@ -339,13 +345,14 @@ function ProjectPipeline() {
     },
     onSuccess: (data, variables) => {
       // Progress to next step on success
-      if (variables === 0) setCurrentStep(1)
-      if (variables === 1) setCurrentStep(2)
-      if (variables === 2) setCurrentStep(3)
-      if (variables === 3) {
+      if (variables === 'all') setCurrentStep(5)
+      else if (variables === 0) setCurrentStep(1)
+      else if (variables === 1) setCurrentStep(2)
+      else if (variables === 2) setCurrentStep(3)
+      else if (variables === 3) {
         queryClient.setQueryData(['projectDetails', project], previous => ({ ...previous, status: data.new_status }))
       }
-      if (variables === 4) setCurrentStep(5)
+      else if (variables === 4) setCurrentStep(5)
 
       queryClient.invalidateQueries({ queryKey: ['projectDetails', project] })
       queryClient.invalidateQueries({ queryKey: ['rawText', project] })
@@ -392,6 +399,7 @@ function ProjectPipeline() {
             </h1>
             <div className="flex items-center gap-2 text-xs text-slate-500">
               <span>Status: <strong className="text-slate-700">{projectDetails?.status || 'Loading...'}</strong></span>
+              {projectDetails?.job && <><span>•</span><span>Job: <strong className={projectDetails.job.status === 'failed' ? 'text-red-600' : 'text-blue-600'}>{projectDetails.job.status}</strong></span></>}
               <span>•</span>
               <span>Assigned: <strong className="text-blue-600">{projectDetails?.assigned_username || 'Unassigned'}</strong></span>
             </div>
@@ -409,6 +417,19 @@ function ProjectPipeline() {
             </select>
             <button onClick={() => saveTtsSettingsMutation.mutate()} disabled={saveTtsSettingsMutation.isPending} className="px-2 py-1 rounded-md bg-slate-800 text-white font-semibold disabled:opacity-50">Save voice</button>
           </div>
+          <label className="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer" title="Force overwrite output files for stages even if they already exist and are newer than inputs.">
+            <input type="checkbox" checked={forceRecompute} onChange={e => setForceRecompute(e.target.checked)} className="rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
+            Force Recompute
+          </label>
+          <button
+            onClick={() => runStageMutation.mutate('all')}
+            disabled={projectDetails?.status === '04_Synthesizing' || runStageMutation.isPending}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-transparent bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold shadow-2xs transition-colors cursor-pointer disabled:opacity-50"
+            title="Run all stages sequentially in the background"
+          >
+            {runStageMutation.isPending && runStageMutation.variables === 'all' ? <ArrowPathIcon className="w-3.5 h-3.5 animate-spin" /> : <SpeakerWaveIcon className="w-3.5 h-3.5" />}
+            <span>Run All Stages</span>
+          </button>
           <button
             onClick={() => { refetchArtifacts(); setShowArtifactsModal(true); }}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
@@ -468,6 +489,12 @@ function ProjectPipeline() {
               {projectDetails.audio_progress.failed.map(chunk => (
                 <p key={chunk.id}>{chunk.id}: {chunk.error}</p>
               ))}
+            </div>
+          )}
+          {projectDetails?.job?.status === 'failed' && (
+            <div role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+              <p className="font-semibold">Stage {projectDetails.job.stage} failed.</p>
+              <p className="mt-1">{projectDetails.job.error || 'The worker reported an unknown error.'} Review the affected artifact and rerun that stage to resume.</p>
             </div>
           )}
           {projectDetails?.audio_progress?.pace_warnings?.length > 0 && (
