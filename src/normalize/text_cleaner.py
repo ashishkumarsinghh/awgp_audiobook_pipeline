@@ -81,6 +81,136 @@ def is_metadata_block(tag: str, content: str) -> bool:
     return False
 
 
+
+_ARTIFACT_LINE = re.compile(
+    r"(?:free\s*read|download\s*&?\s*order|www\.|https?://|"
+    r"vicharkranti(?:books|pustakalay)?|literature\.awgp|awgp\.org|"
+    r"all\s+world\s+gayatri|book\s+made\s+available|book\s+digitized|"
+    r"our\s+main\s+cent(?:er|re)s|phone\s*(?:no|number)?\s*:|"
+    r"\b(?:india|gujarat|surat|haridwar|mathura)\b\s*[-,])",
+    re.IGNORECASE,
+)
+
+_MARKUP = re.compile(r"(?:^\s{0,3}#{1,6}\s*|\*\*?|__?|\x60+|\s*\|\s*)")
+_TOC_MARKER = re.compile(
+    r"(?:\u0935\u093f\u0937\u092f\s*[-\u2013\u2014]?\s*\u0938\u0942\u091a\u0940|\u0905\u0928\u0941\u0915\u094d\u0930\u092e\u0923\u093f\u0915\u093e|table\s+of\s+contents|contents)",
+    re.IGNORECASE,
+)
+_METADATA_LABEL = re.compile(
+    r"^\s*(?:author|editor|publisher|printer|edition|price|"
+    r"[\u0900-\u097f]{2,20})\s*[:\uff1a]?\s*$",
+    re.IGNORECASE,
+)
+
+def _line_without_tags(line: str) -> str:
+    line = re.sub(r"</?[a-zA-Z0-9_]+>", "", line or "")
+    line = _MARKUP.sub(" ", line)
+    return re.sub(r"\s+", " ", line).strip()
+
+def _is_toc_block(content: str) -> bool:
+    value = _line_without_tags(content)
+    numbered_items = re.findall(r"(?:^|\s)[\u0966-\u096f\d]{1,3}\s*[.)-]\s+", value)
+    return bool(_TOC_MARKER.search(value) or len(numbered_items) >= 5)
+
+def _is_artifact_block(content: str) -> bool:
+    value = _line_without_tags(content)
+    if not value or _is_toc_block(value):
+        return True
+    lines = [line for line in re.split(r"\r?\n", content) if _line_without_tags(line)]
+    if not lines:
+        return True
+    artifact_lines = sum(_is_artifact_line(line) for line in lines)
+    has_metadata_label = any(_METADATA_LABEL.match(_line_without_tags(line)) for line in lines)
+    if has_metadata_label and len(value) <= 260:
+        return True
+    if artifact_lines == len(lines):
+        return True
+    if _ARTIFACT_LINE.search(value) and not re.search(r"[\u0900-\u097f]", value):
+        return True
+    return False
+
+def _furniture_key(value: str) -> str:
+    value = _line_without_tags(value)
+    value = re.sub(r"^[\s\[\](){}|\-]*[\u0966-\u096f\d]{1,4}[\s\[\](){}|\-]*", "", value)
+    value = re.sub(r"[\s\[\](){}|\-]*[\u0966-\u096f\d]{1,4}[\s\[\](){}|\-]*$", "", value)
+    return re.sub(r"\s+", " ", value).strip().casefold()
+
+def _find_repeated_furniture(blocks: List[Tuple[str, str]]) -> List[Tuple[str, re.Pattern]]:
+    counts = {}
+    originals = {}
+    for _, content in blocks:
+        key = _furniture_key(content)
+        if 4 <= len(key) <= 120 and not re.search(r"[\u0964\u0965!?]", key):
+            counts[key] = counts.get(key, 0) + 1
+            originals.setdefault(key, _line_without_tags(content))
+    result = []
+    for key, count in counts.items():
+        if count >= 2:
+            result.append((key, re.compile(
+                r"[\s\[\](){}|\-]*[\u0966-\u096f\d]{0,4}[\s\[\](){}|\-]*"
+                + re.escape(originals[key]) +
+                r"[\s\[\](){}|\-]*[\u0966-\u096f\d]{0,4}",
+                re.IGNORECASE,
+            )))
+    return result
+
+def _is_artifact_line(line: str) -> bool:
+    value = _line_without_tags(line)
+    if not value:
+        return True
+    if _ARTIFACT_LINE.search(value):
+        return True
+    if PAGE_NUMBER_PATTERN.fullmatch(value):
+        return True
+    if re.fullmatch(r"[_?\-?| .]{5,}", value):
+        return True
+    if PUBLISHING_METADATA_PATTERN.search(value) and len(value) <= 220:
+        return True
+    return False
+
+
+def _remove_repeated_artifact_lines(blocks: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    candidates = []
+    for _, content in blocks:
+        for line in re.split(r"\r?\n", content):
+            value = _line_without_tags(line)
+            if value and _is_artifact_line(value):
+                candidates.append(re.sub(r"\s+", " ", value).casefold())
+    counts = {}
+    for value in candidates:
+        counts[value] = counts.get(value, 0) + 1
+    repeated = {value for value, count in counts.items() if count >= 3 and len(value) <= 180}
+    furniture = _find_repeated_furniture(blocks)
+    seen_furniture = set()
+    cleaned = []
+    for tag, content in blocks:
+        key = _furniture_key(content)
+        is_first_furniture = False
+        if any(key == furniture_key for furniture_key, _ in furniture):
+            if key in seen_furniture:
+                continue
+            seen_furniture.add(key)
+            is_first_furniture = True
+        lines = []
+        for line in re.split(r"\r?\n", content):
+            value = re.sub(r"\s+", " ", _line_without_tags(line)).strip().casefold()
+            if _is_artifact_line(line) or value in repeated:
+                continue
+            for _, pattern in furniture:
+                if is_first_furniture:
+                    continue
+                stripped = pattern.sub("", line).strip()
+                if stripped != line.strip():
+                    line = stripped
+                    if not _line_without_tags(line):
+                        break
+            if _line_without_tags(line):
+                lines.append(line.strip())
+        rebuilt = "\n".join(line for line in lines if line)
+        if rebuilt:
+            cleaned.append((tag, rebuilt))
+    return cleaned
+
 def is_terminal_sentence_end(text: str) -> bool:
     """Returns True if the text ends with sentence-terminating punctuation."""
     stripped = text.strip()
@@ -167,6 +297,16 @@ def clean_book_headers_and_metadata(text: str, book_title: Optional[str] = None)
         if not clean_content:
             continue
 
+        if _is_artifact_block(clean_content):
+            continue
+        if not matches:
+            clean_content = re.sub(r"^\s*#{1,6}\s*", "", clean_content)
+            clean_content = re.sub(r"\*\*?|__?|\x60+", "", clean_content).strip()
+        clean_content = re.sub(r"^\s*[\u0966-\u096f\d]{1,4}\s*\]\s*\[\s*", "", clean_content).strip()
+        clean_content = re.sub(r"\s+[\u0966-\u096f\d]{1,4}\s*\]\s*\[\s*[^\u0964\u0965!?]{3,120}\s*$", "", clean_content).strip()
+        if not clean_content:
+            continue
+
         # If a substantive heading appears, reset metadata skipping
         if tag in ('heading', 'subheading') and not METADATA_HEADER_PATTERN.match(clean_content):
             skip_next_metadata_prose = False
@@ -229,6 +369,8 @@ def clean_book_headers_and_metadata(text: str, book_title: Optional[str] = None)
                     continue
 
         cleaned_blocks.append((tag, clean_content))
+
+    cleaned_blocks = _remove_repeated_artifact_lines(cleaned_blocks)
 
     has_xml_tags = bool(matches)
 

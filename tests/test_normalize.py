@@ -123,3 +123,26 @@ def test_intra_sentence_piece_splits_have_zero_pause():
         assert s.pause_after_ms == 0, f"Expected 0ms pause mid-sentence, got {s.pause_after_ms}ms"
     # Final piece ending with danda gets normal pause
     assert segments[-1].pause_after_ms > 0
+
+def test_generalized_cleanup_removes_markdown_credits_and_page_furniture():
+    raw_ocr = (
+        "www.awgp.org | www.vicharkrantibooks.org\n\n"
+        "# \u0928\u092f\u0947 \u091c\u0940\u0935\u0928 \u0915\u0940 \u0928\u0908 \u092a\u094d\u0930\u0947\u0930\u0923\u093e\n\n"
+        "Free Read/Download & Order books at www.vicharkrantibooks.org\n\n"
+        ": BOOK MADE AVAILABLE FOR DIGITIZATION BY :\n"
+        "BRAHMVARCHAS SHODH SANSTHAN\n"
+        "SHANTIKUNJ, HARIDWAR, INDIA\n\n"
+        "1. \u0936\u0930\u0940\u0930 \u0915\u0947 \u090a\u092a\u0930 \u092e\u0928 \u0915\u093e \u092a\u094d\u0930\u092d\u093e\u0935 5\n"
+        "2. \u0926\u0930\u093f\u0926\u094d\u0930\u0924\u093e \u090f\u0915 \u092e\u093e\u0928\u0938\u093f\u0915 \u0905\u0936\u0915\u094d\u0924\u093f \u0939\u0948 10\n"
+        "3. \u0926\u0943\u0922\u093c \u0938\u0902\u0915\u0932\u094d\u092a-\u0936\u0915\u094d\u0924\u093f \u0915\u093e \u092a\u094d\u0930\u092d\u093e\u0935 17\n"
+        "4. \u0906\u0924\u094d\u092e-\u0915\u0932\u094d\u092f\u093e\u0923 \u0914\u0930 \u0906\u0924\u094d\u092e-\u0935\u093f\u0936\u094d\u0935\u093e\u0938 21\n"
+        "5. \u0939\u092e\u093e\u0930\u0940 \u0907\u091a\u094d\u091b\u093e\u0936\u0915\u094d\u0924\u093f \u0915\u0940 \u0926\u093f\u0935\u094d\u092f\u0924\u093e 27\n\n"
+        "<prose>\u092f\u0939 \u0935\u093e\u0915\u094d\u092f \u0928\u093e\u0930\u0947\u091f \u0939\u094b\u0928\u093e \u091a\u093e\u0939\u093f\u090f\u0964 \u096c ] [ \u0928\u092f\u0947 \u091c\u0940\u0935\u0928 \u0915\u0940 \u0928\u0908 \u092a\u094d\u0930\u0947\u0930\u0923\u093e</prose>"
+    )
+    cleaned = clean_book_headers_and_metadata(raw_ocr)
+    assert "Free Read" not in cleaned
+    assert "BOOK MADE AVAILABLE" not in cleaned
+    assert "vicharkrantibooks" not in cleaned
+    assert "\u0935\u093f\u0937\u092f-\u0938\u0942\u091a\u0940" not in cleaned
+    assert "\u092f\u0939 \u0935\u093e\u0915\u094d\u092f \u0928\u093e\u0930\u0947\u091f \u0939\u094b\u0928\u093e \u091a\u093e\u0939\u093f\u090f\u0964" in cleaned
+    assert "? ] [" not in cleaned

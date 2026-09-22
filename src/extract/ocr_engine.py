@@ -1,5 +1,7 @@
 """Page-by-page transcription with explicit failures instead of omitted pages."""
-from typing import Optional
+from typing import Dict, List, Optional, Sequence, Tuple
+from collections import Counter
+from io import BytesIO
 import os
 import re
 import json
@@ -35,7 +37,7 @@ def extract_text_from_pdf(
         if doc.needs_pass or not doc.is_pdf or len(doc) == 0:
             raise ValueError("Provide an unlocked PDF containing at least one page.")
         client = get_gemini_client()
-        pages = []
+        pages_by_index: Dict[int, str] = {}
         clean_book = re.sub(r'[^a-zA-Z0-9_-]', '_', book_name or os.path.splitext(os.path.basename(pdf_path))[0])
         if checkpoint_dir:
             os.makedirs(checkpoint_dir, exist_ok=True)
@@ -46,49 +48,78 @@ def extract_text_from_pdf(
             limit = min(max_pages or len(doc), len(doc))
             page_indices = list(range(limit))
 
-        for index in page_indices:
-            page_num = index + 1
-            cached_text = None
-            page_file = None
+        repeated_margin_rects = _find_repeated_margin_rects(doc, page_indices)
 
-            if checkpoint_dir:
-                page_file = os.path.join(checkpoint_dir, f"{clean_book}_page_{page_num:04d}.txt")
-                if os.path.isfile(page_file):
-                    try:
-                        with open(page_file, "r", encoding="utf-8") as f:
-                            content = f.read()
-                            if content.strip():
-                                cached_text = content
-                    except Exception:
-                        pass
+        # Keep each vision request page-scoped: delimiter-based multi-page OCR
+        # can silently mis-associate text with the wrong page.
+        batch_size = 1
+        for batch_start in range(0, len(page_indices), batch_size):
+            batch_indices = page_indices[batch_start:batch_start + batch_size]
+            batch_images = []
+            batch_page_nums = []
 
-            if cached_text is not None:
-                if "<blank_page>" not in cached_text:
-                    pages.append(cached_text)
-                continue
+            for index in batch_indices:
+                page_num = index + 1
+                cached_text = None
+                page_file = None
 
-            page = doc.load_page(index)
-            if client is None:
-                text = page.get_text().strip()
-                if not text:
-                    raise RuntimeError(f"Page {page_num} has no embedded text. Set GEMINI_API_KEY for scanned-page OCR, then retry.")
-            else:
-                print(f"[Stage 0: OCR] Transcribing page {page_num}/{len(page_indices)} with Gemini Flash OCR...")
-                image = page.get_pixmap(dpi=200).tobytes("png")
-                text = _transcribe_page(client, image, page_num)
+                if checkpoint_dir:
+                    page_file = os.path.join(checkpoint_dir, f"{clean_book}_page_{page_num:04d}.txt")
+                    if os.path.isfile(page_file):
+                        try:
+                            with open(page_file, "r", encoding="utf-8") as f:
+                                content = f.read()
+                                if content.strip():
+                                    cached_text = content
+                        except Exception:
+                            pass
+
+                if cached_text is not None:
+                    if "<blank_page>" not in cached_text:
+                        pages_by_index[index] = cached_text
+                    continue
+
+                page = doc.load_page(index)
+                if client is None:
+                    text = _extract_embedded_page_text(page, repeated_margin_rects.get(index, ()))
+                    if not text:
+                        if page.get_text("blocks"):
+                            continue
+                        raise RuntimeError(f"Page {page_num} has no embedded text. Set GEMINI_API_KEY for scanned-page OCR.")
+
+                    if page_file:
+                        try:
+                            with open(page_file, "w", encoding="utf-8") as f:
+                                f.write(text)
+                        except Exception:
+                            pass
+                    if "<blank_page>" not in text:
+                        pages_by_index[index] = text
+                else:
+                    batch_images.append(_render_page_for_ocr(page, repeated_margin_rects.get(index, ())))
+                    batch_page_nums.append(page_num)
+
+            if client is not None and batch_images:
+                print(f"[Stage 0: OCR] Transcribing pages {batch_page_nums} with Gemini Flash OCR...")
+                try:
+                    texts = _transcribe_page_batch(client, batch_images, batch_page_nums)
+                except RuntimeError as exc:
+                    raise RuntimeError(f"page {batch_page_nums[0]} OCR failed: {exc}") from exc
                 time.sleep(2.0)
 
-            if page_file:
-                try:
-                    with open(page_file, "w", encoding="utf-8") as f:
-                        f.write(text)
-                except Exception:
-                    pass
+                for page_num, text in zip(batch_page_nums, texts):
+                    page_file = os.path.join(checkpoint_dir, f"{clean_book}_page_{page_num:04d}.txt") if checkpoint_dir else None
+                    if page_file:
+                        try:
+                            with open(page_file, "w", encoding="utf-8") as f:
+                                f.write(text)
+                        except Exception:
+                            pass
 
-            if "<blank_page>" in text:
-                print(f"[Stage 0: OCR] Page {page_num}: Excluded non-narrative metadata/blank page.")
-            else:
-                pages.append(text)
+                    if "<blank_page>" in text:
+                        print(f"[Stage 0: OCR] Page {page_num}: Excluded non-narrative metadata/blank page.")
+                    else:
+                        pages_by_index[page_num - 1] = text
 
         if checkpoint_dir:
             manifest_path = os.path.join(checkpoint_dir, "ocr_manifest.json")
@@ -103,7 +134,130 @@ def extract_text_from_pdf(
             except Exception:
                 pass
 
-        return "\n\n".join(pages)
+        return "\n\n".join(pages_by_index[i] for i in page_indices if i in pages_by_index)
+
+
+_OVERLAY_TEXT = re.compile(
+    r"(?:free\s+read|download\s*&?\s*order|www\.|https?://|all\s+world\s+gayatri|"
+    r"vicharkrantibooks|literature\.awgp|awgp\.org)", re.IGNORECASE,
+)
+
+
+def _normalise_block_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip().casefold()
+
+
+def _find_repeated_margin_rects(doc, page_indices: Sequence[int]) -> Dict[int, List[Tuple[float, float, float, float]]]:
+    """Locate repeated PDF text overlays in the physical page margins."""
+    candidates = []
+    for index in page_indices:
+        page = doc.load_page(index)
+        height = page.rect.height
+        for block in page.get_text("blocks"):
+            x0, y0, x1, y1, text = block[:5]
+            normal = _normalise_block_text(text)
+            if normal and (y1 <= height * 0.12 or y0 >= height * 0.88):
+                candidates.append((normal, index, (x0, y0, x1, y1)))
+    counts = Counter(text for text, _, _ in candidates)
+    threshold = max(2, min(5, (len(page_indices) + 2) // 3))
+    repeated = {text for text, count in counts.items() if count >= threshold or _OVERLAY_TEXT.search(text)}
+    result: Dict[int, List[Tuple[float, float, float, float]]] = {}
+    for text, index, rect in candidates:
+        if text in repeated:
+            result.setdefault(index, []).append(rect)
+    return result
+
+
+def _extract_embedded_page_text(page, excluded_rects: Sequence[Tuple[float, float, float, float]]) -> str:
+    parts = []
+    for block in page.get_text("blocks"):
+        x0, y0, x1, y1, text = block[:5]
+        block_rect = fitz.Rect(x0, y0, x1, y1)
+        if any(block_rect.intersects(fitz.Rect(*rect)) for rect in excluded_rects):
+            continue
+        if _OVERLAY_TEXT.search(text):
+            continue
+        if text.strip():
+            parts.append(text.strip())
+    return "\n".join(parts)
+
+
+def _render_page_for_ocr(page, excluded_rects: Sequence[Tuple[float, float, float, float]], dpi: int = 200) -> bytes:
+    pixmap = page.get_pixmap(dpi=dpi, alpha=False)
+    if not excluded_rects:
+        return pixmap.tobytes("png")
+    try:
+        from PIL import Image, ImageDraw
+        image = Image.open(BytesIO(pixmap.tobytes("png"))).convert("RGB")
+        scale = dpi / 72.0
+        draw = ImageDraw.Draw(image)
+        for x0, y0, x1, y1 in excluded_rects:
+            draw.rectangle((x0 * scale - 3, y0 * scale - 3, x1 * scale + 3, y1 * scale + 3), fill="white")
+        output = BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+    except ImportError:
+        return pixmap.tobytes("png")
+
+
+def _transcribe_page_batch(client: genai.Client, batch_images: list, batch_page_nums: list) -> list:
+    """Sends a batch of images to Gemini OCR and splits the output back."""
+    prompt = (
+        "You are an expert OCR engine for classical Hindi and Sanskrit texts. "
+        "The user has provided a batch of sequentially ordered page images from a scanned book. "
+        "Transcribe EACH page accurately. "
+        "Output the transcription for each page separated by the exact delimiter: '===PAGE_BREAK===' "
+        "Maintain the strict transcription rules for Devanagari texts. "
+        "Exclude page numbers, repeated running titles, headers, footers, watermarks, scan overlays, "
+        "digitization credits, advertisements, URLs, publisher/printer/author metadata, addresses, "
+        "copyright notices, and table-of-contents/front-matter furniture. "
+        "Do not return any English credit such as Free Read/Download, BOOK MADE AVAILABLE FOR DIGITIZATION, "
+        "BOOK DIGITIZED BY, website names, phone numbers, or center addresses. "
+        "If narrative text shares a page with these artifacts, retain only the narrative text. "
+        "If a page has no narrative content (only numbers, ads, credits, or metadata), output <blank_page> for that page. "
+        "Return only the allowed semantic tags; never return Markdown, explanations, or OCR notes."
+    )
+
+    parts = []
+    for img_bytes in batch_images:
+        parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/png"))
+    parts.append(prompt)
+
+    model_name = os.environ.get("OCR_MODEL") or "gemini-3.6-flash"
+    max_attempts = 5
+    for attempt in range(max_attempts):
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=parts,
+                config=types.GenerateContentConfig(temperature=0.0))
+            text = (response.text or "").strip()
+            if not text:
+                raise ValueError("empty OCR response")
+            # Split the text by delimiter
+            page_texts = [p.strip() for p in text.split("===PAGE_BREAK===")]
+
+            # If model didn't use delimiters correctly but we sent 1 page, handle it safely
+            if len(batch_images) == 1 and len(page_texts) == 1:
+                return page_texts
+
+            # If counts don't match, we fallback to single page processing
+            if len(page_texts) != len(batch_images):
+                print(f"  [Warning] Batch split mismatch (Expected {len(batch_images)}, got {len(page_texts)}). Falling back to sequential.")
+                return [_transcribe_page(client, img, num) for img, num in zip(batch_images, batch_page_nums)]
+
+            return page_texts
+
+        except Exception as exc:
+            err_str = str(exc)
+            if ("404" in err_str or "503" in err_str or "RESOURCE_EXHAUSTED" in err_str) and model_name != "gemini-3.5-flash-lite":
+                print(f"  [ModelFallback] Switching to gemini-3.5-flash-lite...")
+                model_name = "gemini-3.5-flash-lite"
+                continue
+            if attempt < max_attempts - 1:
+                time.sleep(15 * (attempt + 1))
+                continue
+            raise RuntimeError(f"Batch OCR failed: {exc}") from exc
 
 
 def _transcribe_page(client, img_bytes, page_number):
