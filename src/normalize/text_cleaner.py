@@ -158,6 +158,9 @@ def _is_artifact_line(line: str) -> bool:
     value = _line_without_tags(line)
     if not value:
         return True
+    # Never send punctuation-only OCR remnants to TTS.
+    if not re.search(r"[A-Za-z\u0900-\u097f]", value):
+        return True
     if _ARTIFACT_LINE.search(value):
         return True
     if PAGE_NUMBER_PATTERN.fullmatch(value):

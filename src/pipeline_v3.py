@@ -87,7 +87,8 @@ class ProjectManager:
 
         self.profile = NarrationProfile()
         self.segmenter = SemanticSegmenter(self.profile)
-        self.pronunciation = PronunciationDictionary()
+        pronunciation_file = os.environ.get("PRONUNCIATION_FILE")
+        self.pronunciation = PronunciationDictionary(pronunciation_file)
         self.prosody = ProsodyPlanner(self.profile)
         self.tts_provider = (tts_provider or os.environ.get('TTS_PROVIDER', 'edge')).lower()
         self.tts = self._get_tts_provider(tts_voice)
@@ -207,8 +208,7 @@ class ProjectManager:
         """Remove derived active artifacts; keep immutable history in artifacts/ and reusable audio."""
         downstream = {
             "raw": [
-                self.clean_file, self.segments_file, self.phonetics_file, self.master_file,
-                os.path.join(self.stage0_dir, 'text_cleaned.txt'),
+                self.segments_file, self.phonetics_file, self.master_file,
                 os.path.join(self.stage1_dir, 'segments.json'),
                 os.path.join(self.stage2_dir, 'phonetics.json'),
                 os.path.join(self.stage4_dir, 'mastered.mp3'),
@@ -317,7 +317,15 @@ class ProjectManager:
         s0_raw = os.path.join(self.stage0_dir, 'ocr_raw.txt')
 
         # Pick the latest edited text
-        target_txt = input_text_file or get_latest_file(s0_cleaned, self.clean_file, s0_raw, self.raw_file)
+        if input_text_file:
+            target_txt = input_text_file
+        else:
+            # Cleaned OCR is authoritative. Do not let a same-timestamp raw
+            # alias win and bypass header/footer removal.
+            target_txt = next(
+                (path for path in (s0_cleaned, self.clean_file) if path and os.path.isfile(path)),
+                get_latest_file(s0_raw, self.raw_file),
+            )
         if not target_txt or not os.path.isfile(target_txt):
             raise FileNotFoundError(f"No input text found in {self.stage0_dir} or {self.project_dir}. Run Stage 0 (OCR) first.")
 

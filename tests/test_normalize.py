@@ -146,3 +146,13 @@ def test_generalized_cleanup_removes_markdown_credits_and_page_furniture():
     assert "\u0935\u093f\u0937\u092f-\u0938\u0942\u091a\u0940" not in cleaned
     assert "\u092f\u0939 \u0935\u093e\u0915\u094d\u092f \u0928\u093e\u0930\u0947\u091f \u0939\u094b\u0928\u093e \u091a\u093e\u0939\u093f\u090f\u0964" in cleaned
     assert "? ] [" not in cleaned
+
+
+def test_punctuation_only_ocr_blocks_are_not_narrated():
+    cleaned = clean_book_headers_and_metadata(
+        "<prose>---</prose>\n<prose>[</prose>\n<prose><-></prose>\n"
+        "<prose>\u092f\u0939 \u0935\u093e\u0938\u094d\u0924\u0935\u093f\u0915 \u0935\u093e\u0915\u094d\u092f \u0939\u0948\u0964</prose>"
+    )
+    assert "\u0935\u093e\u0938\u094d\u0924\u0935\u093f\u0915 \u0935\u093e\u0915\u094d\u092f" in cleaned
+    assert "---" not in cleaned
+    assert "<->" not in cleaned
