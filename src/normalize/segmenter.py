@@ -9,7 +9,7 @@ from src.normalize.text_cleaner import clean_book_headers_and_metadata, is_metad
 
 
 class SemanticSegmenter:
-    def __init__(self, narration_profile=None, sentences_per_chunk=3, max_chars_per_chunk=700):
+    def __init__(self, narration_profile=None, sentences_per_chunk=8, max_chars_per_chunk=1400):
         if sentences_per_chunk < 1 or max_chars_per_chunk < 1:
             raise ValueError("Chunk limits must be positive.")
         self.profile = narration_profile
@@ -102,6 +102,7 @@ class SemanticSegmenter:
                     "shloka": 800, "stanza": 800, "mantra": 800,
                     "chant_refrain": 700, "gloss": 350,
                     "question": 500, "quote": 400, "reflective": 400, "conclusion": 600,
+                    "prose": 220, "paragraph": 220, "sentence": 220,
                 }
 
                 current = []
@@ -135,7 +136,7 @@ class SemanticSegmenter:
                     chunk = " ".join(current)
                     final_tag = self._detect_sentence_tag(chunk, tag)
                     if current_ends_at_sentence:
-                        pause = pause_map.get(final_tag, 600 if is_last_paragraph_in_block else 350)
+                        pause = pause_map.get(final_tag, 220 if is_last_paragraph_in_block else 180)
                         if tag in ("heading", "subheading", "book_title", "shloka", "stanza", "mantra"):
                             pause = pause_map.get(tag, 800)
                     else:

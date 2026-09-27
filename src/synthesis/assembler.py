@@ -35,7 +35,8 @@ class AudioAssembler:
                 target.setsampwidth(2)
                 target.setframerate(24000)
                 for segment in segments:
-                    target.writeframes(bytes(segment.pause_before_ms * 24 * 2))
+                    # pause_after on the preceding chunk is the single owner
+                    # of a boundary; pause_before is for inline SSML only.
                     with wave.open(segment.audio_file, "rb") as source:
                         while data := source.readframes(24000):
                             target.writeframes(data)

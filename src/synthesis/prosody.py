@@ -169,7 +169,7 @@ class ProsodyPlanner:
                     rate_var = -2
                     pitch_var = +1
                     if seg.pause_after_ms == 0:
-                        seg.pause_after_ms = max(self.profile.paragraph_pause_ms, 600)
+                        seg.pause_after_ms = max(self.profile.paragraph_pause_ms, 450)
                 elif is_opener:
                     # Paragraph topic opener: F0 pitch reset (+2Hz) and deliberate pacing (-3%)
                     rate_var = -3
@@ -181,7 +181,7 @@ class ProsodyPlanner:
                     rate_var = -4
                     pitch_var = -1
                     if seg.pause_after_ms == 0:
-                        seg.pause_after_ms = max(self.profile.paragraph_pause_ms, 650)
+                        seg.pause_after_ms = max(self.profile.paragraph_pause_ms, 450)
                 else:
                     # Paragraph body development: linear F0 declination tilt
                     if in_para_idx == 1:

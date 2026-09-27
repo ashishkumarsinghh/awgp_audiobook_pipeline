@@ -1,170 +1,256 @@
-# AWGP audiobook pipeline
+# AWGP Audiobook Pipeline
 
-A local FastAPI + React workflow for transcribing Hindi/Sanskrit PDF books, reviewing text and pronunciation, generating narration, and mastering an MP3.
+Convert scanned Hindi/Sanskrit books into reviewed, resumable audiobooks.
 
-## Run locally
+The pipeline keeps two separate representations:
 
-Run commands from the repository root. Stage execution is persisted in the
-database and claimed by a lease-based worker in each API process. Multiple
-workers can share the queue; SQLite remains best for local/small deployments,
-while PostgreSQL is recommended for concurrent production workers.
+- \`source_text\`: the OCR transcript. It must remain faithful to the page.
+- \`pronunciation_text\`: an editable TTS-only pronunciation layer. Respelling a word here never changes the transcript.
+
+OCR excludes repeated headers, footers, page numbers, watermarks, URLs, publisher overlays, and advertisements. Unreadable text is marked \`[???????]\` instead of being guessed.
+
+## 1. Install once
+
+Run from the repository root:
 
 ~~~sh
 python3 -m venv venv
 . venv/bin/activate
 pip install -r requirements.txt
-# Install the system ffmpeg package and confirm:
 ffmpeg -version
+~~~
+
+Optional web application:
+
+~~~sh
 cd frontend
 npm ci
 cd ..
-# For an existing database from an older checkout (stop the API first):
-python scripts/migrate_db.py
 uvicorn api:app --host 127.0.0.1 --port 8000
-# In another terminal:
-cd frontend
-npm run dev
 ~~~
 
-For a new installation, skip the migration until the API creates its database. The migration is idempotent and creates a timestamped SQLite backup before adding missing columns.
-
-The frontend is at http://localhost:5173 and API documentation at http://localhost:8000/docs. The first registered account becomes administrator; later accounts are editors. Editors register their volunteer profile and request allocation; only administrators can assign books. Uploaded book titles are preserved for display, while the API generates a unique safe slug for storage and URLs.
-
-Existing start.sh/start.ps1/start.bat launchers remain available. start.sh currently kills processes occupying its ports and exports .env through shell word splitting; use the explicit commands above when other services share the machine.
-
-Set these variables in a local .env (do not commit credentials):
-
-| Variable | Purpose |
-| --- | --- |
-| GEMINI_API_KEY | Remote scanned-page OCR. Without it, only embedded PDF text can be extracted. |
-| OCR_MODEL | Overrides the existing default gemini-3.6-flash. Confirm model availability for your account. |
-| SARVAM_API_KEY | Sarvam AI Bulbul TTS API key (for authentic Indian language voices). |
-| TTS_PROVIDER | edge by default; sarvam (Sarvam AI Bulbul v3); studio (Google AI Studio); google (Google Cloud Neural2/WaveNet). |
-| TTS_VOICE | Optional provider voice; defaults to shubh for sarvam, Kore for studio, Swara for edge/azure, hi-IN-Neural2-B for google. |
-| AZURE_SPEECH_KEY | Azure Speech subscription key (required only for Azure projects). |
-| AZURE_SPEECH_REGION | Azure Speech region, for example `centralindia` (required only for Azure projects). |
-| JWT_SECRET_KEY | Set a private random signing secret before sharing access to the API. |
-| DATABASE_URL | Defaults to sqlite:///./audiobook_pipeline.db; tests use isolated in-memory databases. |
-| JOB_WORKER_ENABLED | Enables the durable polling worker in each API process; defaults to `1`. |
-
-Sarvam AI TTS (`--provider sarvam`) uses `SARVAM_API_KEY` and the `bulbul:v3` model to generate highly authentic, natural native Indian language speech (voices: `shubh`, `ashutosh`, `advait`, `ritu`, `priya`, `roopa`). Google AI Studio TTS (`--provider studio`) uses `GEMINI_API_KEY` to generate 24 kHz audio via `gemini-3.1-flash-tts-preview` (`Kore`, `Charon`). Google Cloud TTS (`--provider google`) uses Application Default Credentials (`gcloud auth application-default login`) with high-fidelity Neural2 voices (`hi-IN-Neural2-B`, `hi-IN-Neural2-A`). Edge requires network access. Azure requires the Azure Speech SDK and `AZURE_SPEECH_KEY`/`AZURE_SPEECH_REGION`. The editor exposes a curated catalog of high-quality Hindi voices across providers. Failures are explicit and providers are never silently substituted.
-
-## Review and produce a book
-
-1. Upload a PDF and run OCR.
-2. Compare the transcription with the PDF and save reviewed text. Resolve every [अस्पष्ट] marker. Preserve intended punctuation, spelling and verse boundaries.
-3. Run Segmentation and review source chunks.
-4. Run Phonetics and review pronunciation aliases, rate, pitch and pauses.
-5. Run Audio. Progress reports current completed chunks and individual errors. Retry after correcting an error to resume verified work.
-6. Listen to the chunks, then run Mastering. Listen through the final book before publishing.
-7. Final release requires two approvals from different human reviewers. A first approval moves the candidate to “Awaiting second approval”; unresolved blockers or a duplicate reviewer cannot complete release.
-
-OCR preserves the existing transcription prompt. Shantikunj normalization helpers remain opt-in utilities, not an automatic rewrite of sacred text. Blank/unreadable pages stop OCR with their page number and require review rather than being silently skipped.
-
-Source chunks have a hard 1,000-character limit and at most five sentence pieces. Long paragraphs and verses split at word boundaries. A single oversized OCR token produces a spacing-review error instead of splitting a Devanagari word. Paragraphs, semantic tags, punctuation runs and decimals are retained.
-
-## Artifacts and retries
-
-| Artifact | Meaning |
-| --- | --- |
-| 00_scanned.pdf | Uploaded source |
-| 01_ocr_raw.txt | Raw transcription |
-| 02_text_cleaned.txt | Human-reviewed text |
-| 03_segments.json | Editable source segments |
-| 04_phonetics.json | Editable pronunciation/prosody script |
-| 05_audio_chunks/ | Mono 24 kHz 16-bit PCM WAVs |
-| 05_audio_chunks/manifest.json | Input/voice fingerprints, audio digests, durations and errors |
-| 06_mastered.mp3 | Mastered delivery audio |
-| artifacts/ | Timestamped historical artifacts recorded by the API |
-
-Saving changed source text invalidates downstream active artifacts. Identical saves preserve derived work. Source and phonetics edits are separate; source changes require rerunning Phonetics. Historical artifacts and reusable chunks remain. Changes to pronunciation, provider, voice, rate or pauses invalidate matching fingerprints.
-
-Pre-manifest audio must be regenerated once. File size alone no longer establishes success. Retries reject corrupt/partial output and never fill missing narration with silence. Mastering requires every expected chunk in script order and publishes only after successful assembly. Both pause-before and pause-after values are honored. Polling uses fingerprints/file metadata; resume, chunk playback and mastering perform waveform/digest checks.
-
-Stage requests create durable jobs. Workers claim one job per project using a
-database lease, renew the lease while running, and reclaim expired jobs after a
-worker crash. Repeating a failed stage queues it again and resumes from that
-stage using the existing validated artifacts and audio manifest. The API
-exposes `job_id` in stage responses, includes the latest job in project details,
-and provides `GET /api/projects/{project_name}/jobs/{job_id}` for polling.
-
-You may run any individual stage (`1` OCR, `2` segmentation, `3` phonetics,
-`4` audio, or `5` mastering) or `all`; no earlier stage is implicitly rerun.
-Review or repair the relevant artifact, then submit that stage again. Do not
-edit the same project through the CLI while an API job is active.
-
-## Minimal-verbosity CLI execution (`run.py`)
-
-Run commands directly from the root folder without long arguments or flags:
+For OCR of scanned pages, set \`GEMINI_API_KEY\`. For TTS choose one provider:
 
 ~~~sh
-python run.py <book_name> <stage>
+export GEMINI_API_KEY="..."
+export TTS_PROVIDER=edge
+export TTS_VOICE=hi-IN-SwaraNeural
+export PRONUNCIATION_FILE=configs/improved_pronunciation.json
 ~~~
 
-### Quick stage mapping
+Provider examples:
 
-| Stage | Command | Stage Subfolder | Input Picked | Output Saved | Human Edit Location |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **0** (OCR) | `python run.py my_book 0` | `00_ocr/` | `00_ocr/*.pdf` or `my_book.pdf` | `ocr_raw.txt` | `00_ocr/text_cleaned.txt` |
-| **1** (Segmentation) | `python run.py my_book 1` | `01_segments/` | `00_ocr/text_cleaned.txt` / `ocr_raw.txt` | `segments.json` | `01_segments/segments.json` |
-| **2** (Phonetics) | `python run.py my_book 2` | `02_phonetics/` | `01_segments/segments.json` | `phonetics.json` | `02_phonetics/phonetics.json` |
-| **3** (Audio) | `python run.py my_book 3` | `03_audio/` | `02_phonetics/phonetics.json` | `chunks/*.wav` + `manifest.json` | Resumes pending/edited |
-| **4** (Mastering) | `python run.py my_book 4` | `04_master/` | `02_phonetics/phonetics.json` + `03_audio/` | `mastered.mp3` | Master delivery audio |
+- \`edge\`: \`hi-IN-SwaraNeural\` or \`hi-IN-MadhurNeural\`
+- \`sarvam\`: requires \`SARVAM_API_KEY\`
+- \`google\`: requires Google Cloud ADC
+- \`azure\`: requires \`AZURE_SPEECH_KEY\` and \`AZURE_SPEECH_REGION\`
+- \`studio\`: requires \`GEMINI_API_KEY\`
 
-### Workflow: Edit in subfolders & resume
+Google Cloud supports Hindi voices and SSML phoneme/custom-pronunciation controls. See [Hindi voices](https://cloud.google.com/text-to-speech/docs/voices) and [SSML phonemes](https://cloud.google.com/text-to-speech/docs/phonemes).
 
-Each stage automatically detects its input from the previous stage subfolder. All manual edits are made directly in the corresponding stage subfolder:
+## 2. Convert a complete PDF
+
+Use a stable project name. A Windows PDF path is easiest through its WSL path:
 
 ~~~sh
-# 1. Run OCR (resumable per-page checkpoints in 00_ocr/checkpoints/):
-python run.py brahma_sandhya 0
+. venv/bin/activate
+export GEMINI_API_KEY="..."
+export TTS_PROVIDER=edge
+export TTS_VOICE=hi-IN-SwaraNeural
 
-# 2. Review and edit text right in: projects/brahma_sandhya/00_ocr/text_cleaned.txt
-# Then run Segmentation (automatically picks up your edits from 00_ocr/):
-python run.py brahma_sandhya 1
-
-# 3. Review and edit segment chunk boundaries right in: projects/brahma_sandhya/01_segments/segments.json
-# Then run Phonetics (automatically picks up your edited segments):
-python run.py brahma_sandhya 2
-
-# 4. Review and edit pronunciation aliases & prosody in: projects/brahma_sandhya/02_phonetics/phonetics.json
-# Then run Audio (automatically resumes and synthesizes only missing or changed chunks):
-python run.py brahma_sandhya 3
-
-# 5. Run Mastering to produce the final audiobook:
-python run.py brahma_sandhya 4
-
-# Check project status at any time:
-python run.py brahma_sandhya
-
-# Or run all stages sequentially:
-python run.py brahma_sandhya all
+python run.py "/mnt/c/Users/ashis/Downloads/HINR0862_NAE_JIVAN_KI_NAYI_PRERANA_1st1964.pdf" all
 ~~~
 
-### Artifact Naming & Resumability Structure
+The PDF path creates a project under:
 
-Every project folder organizes active state, stage subfolders, checkpoints, and immutable historical archives:
+~~~text
+projects/HINR0862_NAE_JIVAN_KI_NAYI_PRERANA_1st1964/
+~~~
 
-- **Stage Subfolders**: `00_ocr/`, `01_segments/`, `02_phonetics/`, `03_audio/`, `04_master/`.
-- **OCR Page Checkpoints (`00_ocr/checkpoints/`)**: Saves individual page transcriptions (`<book>_page_0001.txt`, `ocr_manifest.json`). If OCR is interrupted, rerunning Stage 0 resumes from the pending page without reprocessing completed pages.
-- **Historical Timestamped Artifacts (`artifacts/`)**: Every run archives a timestamped file with the book name:
-  `<book_name>_<stage_label>_<tag>_<YYYYMMDD_HHMMSS>.<ext>`
-  (e.g. `brahma_sandhya_00_ocr_raw_cli_20260917_195000.txt`, `brahma_sandhya_02_segments_cli_20260917_195100.json`).
-- **Granular Audio Resume (`03_audio/manifest.json`)**: Tracks chunk fingerprints and SHA-256 digests. If phonetics are modified for only a few chunks, running Stage 3 re-synthesizes *only* the changed chunks.
-- **Custom Flag Overrides**: Full compatibility flags (`--project`, `--stage`, `--input`, `--output`, `--voice`, `--provider`) remain available.
+To test only selected pages first:
 
-## Validation
+~~~sh
+python run.py "/mnt/c/Users/ashis/Downloads/HINR0862_NAE_JIVAN_KI_NAYI_PRERANA_1st1964.pdf" 0 --page 1
+python run.py "/mnt/c/Users/ashis/Downloads/HINR0862_NAE_JIVAN_KI_NAYI_PRERANA_1st1964.pdf" 0 --max-pages 10
+~~~
+
+\`all\` runs OCR, segmentation, pronunciation/prosody, audio, and mastering/export. OCR checkpoints make interrupted runs resumable. Audio manifests regenerate only missing or changed chunks.
+
+## 3. Stage map
+
+Run \`python run.py <book-or-project> <stage>\`:
+
+| Stage | Command name | Reads | Writes |
+|---|---|---|---|
+| 0 | \`ocr\` | PDF | \`00_ocr/ocr_raw.txt\`, \`00_ocr/text_cleaned.txt\`, page checkpoints |
+| 1 | \`segment\` | cleaned OCR | \`01_segments/segments.json\` |
+| 2 | \`phonetics\` | segments | \`02_phonetics/phonetics.json\` |
+| 3 | \`audio\` | phonetics | \`03_audio/*.wav\`, \`manifest.json\` |
+| 4 | \`master\` | audio + phonetics | \`04_master/mastered.mp3\` |
+| 5 | \`speed\` | mastered MP3 | tempo-adjusted delivery MP3 |
+| 6 | \`metadata\` | mastered MP3 | tagged final MP3 |
+
+Numeric aliases are also accepted: \`0\` through \`6\`.
+
+For a named project:
+
+~~~sh
+python run.py HINR0862_NAE_JIVAN_KI_NAYI_PRERANA_1st1964 0
+python run.py HINR0862_NAE_JIVAN_KI_NAYI_PRERANA_1st1964
+~~~
+
+## 4. Review and edit safely
+
+Run one stage at a time when human review is required. A later stage never silently reruns an earlier stage.
+
+### OCR review
+
+Open and correct:
+
+~~~text
+projects/<book>/00_ocr/text_cleaned.txt
+~~~
+
+Then regenerate segments:
+
+~~~sh
+python run.py <book> 1 --force
+~~~
+
+Never correct OCR by editing phonetics. Correct the transcript first. Preserve the printed spelling. If the page is genuinely unclear, use \`[???????]\`; generation will stop until it is resolved.
+
+### Segmentation review
+
+Edit:
+
+~~~text
+projects/<book>/01_segments/segments.json
+~~~
+
+You may adjust chunk boundaries and \`segment_type\`. Keep \`source_text\` verbatim. Then run:
+
+~~~sh
+python run.py <book> 2 --force
+~~~
+
+### Pronunciation/prosody review
+
+Edit:
+
+~~~text
+projects/<book>/02_phonetics/phonetics.json
+~~~
+
+Use \`pronunciation_text\` for TTS-only fixes such as:
+
+~~~json
+{
+  "source_text": "???? ?? ????-?????",
+  "pronunciation_text": "??? ?? ???? ?????"
+}
+~~~
+
+Do not replace \`source_text\`. Adjust \`rate\`, \`pitch\`, \`volume\`, and pauses only when needed. Then synthesize:
+
+~~~sh
+python run.py <book> 3
+~~~
+
+Only changed or missing audio chunks are regenerated.
+
+### Audio and mastering review
+
+Listen to chunks in \`03_audio/\`. If the phonetics file is correct:
+
+~~~sh
+python run.py <book> 3
+python run.py <book> 4 --speed 1.15
+python run.py <book> 6
+~~~
+
+For a different final tempo:
+
+~~~sh
+python run.py <book> 5 --speed 1.10
+python run.py <book> 6
+~~~
+
+## 5. Efficient editing loop
+
+~~~sh
+# Initial generation
+python run.py <book> 0
+python run.py <book> 1
+python run.py <book> 2
+python run.py <book> 3
+python run.py <book> 4
+python run.py <book> 6
+
+# After OCR/source edits
+python run.py <book> 1 --force
+python run.py <book> 2 --force
+python run.py <book> 3
+python run.py <book> 4
+python run.py <book> 6
+
+# After segment edits
+python run.py <book> 2 --force
+python run.py <book> 3
+python run.py <book> 4
+python run.py <book> 6
+
+# After pronunciation or prosody edits
+python run.py <book> 3
+python run.py <book> 4
+python run.py <book> 6
+~~~
+
+Use the dashboard at any time:
+
+~~~sh
+python run.py <book>
+~~~
+
+Do not edit the same project simultaneously through the web UI and CLI.
+
+## 6. Project artifacts
+
+~~~text
+projects/<book>/
+  00_ocr/
+    00_scanned.pdf
+    ocr_raw.txt
+    text_cleaned.txt
+    checkpoints/
+  01_segments/
+    segments.json
+  02_phonetics/
+    phonetics.json
+  03_audio/
+    chunk_0001.wav
+    manifest.json
+  04_master/
+    mastered.mp3
+    <book>.mp3
+  artifacts/
+~~~
+
+\`artifacts/\` contains timestamped history. Do not delete checkpoints or manifests while a stage is running.
+
+## 7. Validation
 
 ~~~sh
 venv/bin/python -m pytest -q
 venv/bin/python -m compileall -q src api.py
 venv/bin/python -m pip check
-cd frontend
-npm test -- --run
-npm run build
-npm run lint
 ~~~
 
-Pytest collects tests/ only. scripts/test_tts_providers.py is a manual network diagnostic, deliberately excluded from offline tests. Tests use isolated databases, temporary artifacts and provider doubles; live credentials are unnecessary.
+Before publishing, review:
 
-See docs/architecture-review.md for findings and remaining work.
+- no \`[???????]\` markers remain;
+- no page numbers, headers, footers, URLs, or publisher text are present;
+- OCR wording matches the scan;
+- pronunciation edits exist only in \`pronunciation_text\`;
+- hyphenated Hindi compounds sound natural;
+- chunk transitions contain no duplicate or abrupt pauses;
+- the final MP3 has been listened to end-to-end.

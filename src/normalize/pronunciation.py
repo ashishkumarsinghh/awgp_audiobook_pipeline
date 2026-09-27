@@ -50,6 +50,13 @@ class PronunciationDictionary:
             'प्रचोदयात्': 'प्रचोदयात', 'कुर्यात्': 'कुर्यात', 'स्यात्': 'स्यात', 'भवेत्': 'भवेत'
         }
         
+        self.add_word('दुःख', 'दुख')
+        self.add_word('दुःखी', 'दुखी')
+        self.add_word('दुःखद', 'दुखद')
+        self.add_word('दुःखित', 'दुखित')
+        self.add_word('दुःस्वप्न', 'दुस्वप्न')
+        self.add_word('दुःसाहस', 'दुस्साहस')
+
         for d in [h_conjuncts, vocalic_r, bija, varga, terminal_halants]:
             for k, v in d.items():
                 self.add_word(k, v)
@@ -79,8 +86,11 @@ class PronunciationDictionary:
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+                if isinstance(data, dict):
+                    data = data.get("rules", [])
                 for item in data:
-                    self.add_word(item["source"], item["tts_alias"])
+                    if isinstance(item, dict) and item.get("source") and item.get("tts_alias"):
+                        self.add_word(item["source"], item["tts_alias"])
         except FileNotFoundError:
             pass
 
@@ -137,6 +147,10 @@ class PronunciationDictionary:
             pattern = r'(?<![\u0900-\u097F])' + re.escape(word) + r'(?![\u0900-\u097F])'
             text = re.sub(pattern, self.exact_words[word], text)
             
+        # Hindi TTS treats a Devanagari compound hyphen as literal punctuation.
+        # Keep the source hyphen intact, but give TTS two lexical words.
+        text = re.sub(r"(?<=[\u0900-\u097F])[-‑–](?=[\u0900-\u097F])", " ", text)
+
         # 1. Systematic Visarga Dynamic Echo Rules (Regex)
         # Preceded by i/ii (ि/ी)
         text = re.sub(r'([िी])ः(?=[\s।॥,?!*\'"”’]|$)', r'\1हि', text)

@@ -21,8 +21,13 @@ def test_visarga_echo_a(pd):
     assert pd.apply("बुधैः") == "बुधैह"
     assert pd.apply("आगमैः") == "आगमैह"
 
-def test_visarga_mid_word(pd):
-    assert pd.apply("दुःख") == "दुःख" # Mid-word shouldn't be altered
+def test_common_hindi_visarga_word_uses_hindi_tts_form(pd):
+    # The source remains दुःख; only pronunciation_text uses the Hindi form.
+    assert pd.apply('दुःख') == 'दुख'
+
+
+def test_devanagari_compound_hyphen_becomes_word_boundary(pd):
+    assert pd.apply('साधन-शक्ति') == 'साधन शक्ति'
 
 def test_terminal_virama(pd):
     assert pd.apply("भगवान्", context="shloka") == "भगवान"

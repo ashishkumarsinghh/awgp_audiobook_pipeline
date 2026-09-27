@@ -96,6 +96,8 @@ class AudioEnhancer:
         lossless: bool = False,
         speed: float = 1.15,
         eq_profile: str = "smooth",
+        target_lufs: float = -18.0,
+        true_peak: float = -1.5,
     ):
         """
         Apply audiobook-oriented mastering with warm anti-fatigue EQ and optional pitch-preserving tempo adjustment (default: 1.15x).
@@ -131,9 +133,9 @@ class AudioEnhancer:
 
         filters.append(
             "loudnorm="
-            "I=-18:"
+            f"I={target_lufs}:"
             "LRA=6:"
-            "TP=-1.5:"
+            f"TP={true_peak}:"
             "dual_mono=true:"
             "print_format=summary"
         )

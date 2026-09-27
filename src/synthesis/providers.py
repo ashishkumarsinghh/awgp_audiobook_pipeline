@@ -85,7 +85,10 @@ class GeminiTTSProvider(TTSProvider):
         text = segment.pronunciation_text or segment.normalized_text or segment.source_text
         text = text.strip() if text else ""
 
-        text = re.sub(r'<[^>]+>', '', text)
+        # Do not strip SSML if present!
+        if not ("<speak" in text or "<phoneme" in text or "<emphasis" in text or "<prosody" in text or "<break" in text):
+            text = re.sub(r'<[^>]+>', '', text)
+
         text = re.sub(r'\s+', ' ', text).strip()
 
         is_wav = output_path.endswith(".wav")
@@ -103,9 +106,14 @@ class GeminiTTSProvider(TTSProvider):
         try:
             from google.cloud import texttospeech
 
-            synthesis_input = texttospeech.SynthesisInput(text=text)
+            # Detect SSML markup
+            if "<speak" in text or "<phoneme" in text or "<emphasis" in text or "<prosody" in text or "<break" in text:
+                if not text.strip().startswith("<speak"):
+                    text = f"<speak>{text}</speak>"
+                synthesis_input = texttospeech.SynthesisInput(ssml=text)
+            else:
+                synthesis_input = texttospeech.SynthesisInput(text=text)
 
-            # Map segment type to voice
             voice_name = self.voice
 
             voice = texttospeech.VoiceSelectionParams(

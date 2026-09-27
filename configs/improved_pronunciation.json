@@ -1,0 +1,229 @@
+{
+  "rules": [
+    {
+      "source": "साधन-शक्ति",
+      "tts_alias": "साधन शक्ति",
+      "context": "hyphenated-compound"
+    },
+    {
+      "source": "अक्षत",
+      "tts_alias": "अक्षत",
+      "context": "sanskrit"
+    },
+    {
+      "source": "रुग्ण",
+      "tts_alias": "रुग्न",
+      "context": "sanskrit"
+    },
+    {
+      "source": "प्रवृत्त",
+      "tts_alias": "प्रवृत्त",
+      "context": "sanskrit"
+    },
+    {
+      "source": "मानसिक सहयोग",
+      "tts_alias": "मानसिक सहयोग",
+      "context": "phrase"
+    },
+    {
+      "source": "किन्तु",
+      "tts_alias": "किंतु",
+      "context": "normalization"
+    },
+    {
+      "source": "परन्तु",
+      "tts_alias": "परंतु",
+      "context": "normalization"
+    },
+    {
+      "source": "व्यवहार",
+      "tts_alias": "व्यवाहार",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "जाए",
+      "tts_alias": "जाय",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "कल्याण",
+      "tts_alias": "कल्यान",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "राजनगरों",
+      "tts_alias": "राज नगरों",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "मनोदशा",
+      "tts_alias": "मनोगती",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "म्लान",
+      "tts_alias": "ग्लान",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "बी०ए० एम०ए०",
+      "tts_alias": "बी ए एम ए",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "ताश-तमाशे",
+      "tts_alias": "ताश तमाशे",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "दुःख",
+      "tts_alias": "दु:ख",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "दृष्टिकोण",
+      "tts_alias": "दृष्टिकोन",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "स्वभाव",
+      "tts_alias": "स्वभाव",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "किंकर्तव्यविमूढ़",
+      "tts_alias": "किं-कर्तव्य-विमूढ़",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "निश्चित",
+      "tts_alias": "निश्चत",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "प्रसन्नताजनक",
+      "tts_alias": "प्रसनताजनक",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "दुःखमय",
+      "tts_alias": "दु:खमय",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "जीवन रस",
+      "tts_alias": "जीवन-रस",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "उछला-उछला",
+      "tts_alias": "उछला उछला",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "स्पष्ट",
+      "tts_alias": "स्पस्ट",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "मानव समाज",
+      "tts_alias": "मानब समाज",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "प्रद्ममय",
+      "tts_alias": "प्रदमय",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "भोंड़ी",
+      "tts_alias": "भोंडी",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "पूर्णतया",
+      "tts_alias": "पूरणतया",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "प्रजय",
+      "tts_alias": "पराजय",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "ट्रांसमीटर",
+      "tts_alias": "ट्रांस-मीटर",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "प्रफुल्लता",
+      "tts_alias": "प्रफुलता",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "प्रादुर्भाव",
+      "tts_alias": "प्रादुभाव",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "कल्याणकारी",
+      "tts_alias": "कल्यानकारी",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "अकल्याण",
+      "tts_alias": "अकल्यान",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "बी० ए० किया, एम० ए० किया",
+      "tts_alias": "बी ए किया, एम ए किया",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "प्रजापति",
+      "tts_alias": "प्रजापती",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "वेदांत",
+      "tts_alias": "वेदान्त",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "सकती",
+      "tts_alias": "सकती",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "आत्मधनी",
+      "tts_alias": "आत्म-धनी",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "सृजनात्मक",
+      "tts_alias": "सृज-नात्मक",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "पगडंडी",
+      "tts_alias": "पग-डंडी",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "निम्न",
+      "tts_alias": "निम्न",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "निर्बल",
+      "tts_alias": "निरबल",
+      "context": "pronunciation fix"
+    }
+  ],
+  "human_review_required": [
+    "अक्षत",
+    "रुग्ण",
+    "प्रवृत्त"
+  ]
+}
