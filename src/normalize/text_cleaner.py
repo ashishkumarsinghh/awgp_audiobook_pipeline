@@ -196,6 +196,10 @@ def _remove_repeated_artifact_lines(blocks: List[Tuple[str, str]]) -> List[Tuple
             is_first_furniture = True
         lines = []
         for line in re.split(r"\r?\n", content):
+            if tag == 'metadata_page':
+                lines.append(line)
+                continue
+                
             value = re.sub(r"\s+", " ", _line_without_tags(line)).strip().casefold()
             if _is_artifact_line(line) or value in repeated:
                 continue
@@ -258,17 +262,22 @@ def clean_book_headers_and_metadata(text: str, book_title: Optional[str] = None)
     # Parse XML blocks
     block_regex = re.compile(r'<([a-zA-Z0-9_]+)>(.*?)</\1>', re.DOTALL)
     raw_blocks: List[Tuple[str, str]] = []
-
+    
+    parts = re.split(r'(<[a-zA-Z0-9_]+>.*?</[a-zA-Z0-9_]+>)', text, flags=re.DOTALL)
     matches = list(block_regex.finditer(text))
-    if matches:
-        for m in matches:
+    
+    for part in parts:
+        if not part.strip():
+            continue
+        m = block_regex.match(part)
+        if m:
             tag = m.group(1).lower()
             content = m.group(2).strip()
             raw_blocks.append((tag, content))
-    else:
-        for part in text.split('\n\n'):
-            if part.strip():
-                raw_blocks.append(('prose', part.strip()))
+        else:
+            for untagged_part in part.split('\n\n'):
+                if untagged_part.strip():
+                    raw_blocks.append(('prose', untagged_part.strip()))
 
     # Build regexes for detecting running headers
     running_header_regexes = []
@@ -298,6 +307,10 @@ def clean_book_headers_and_metadata(text: str, book_title: Optional[str] = None)
     for i, (tag, content) in enumerate(raw_blocks):
         clean_content = content.strip()
         if not clean_content:
+            continue
+
+        if tag == 'metadata_page':
+            cleaned_blocks.append((tag, clean_content))
             continue
 
         if _is_artifact_block(clean_content):
