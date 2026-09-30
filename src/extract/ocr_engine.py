@@ -134,7 +134,11 @@ def extract_text_from_pdf(
             except Exception:
                 pass
 
-        return "\n\n".join(pages_by_index[i] for i in page_indices if i in pages_by_index)
+        assembled_pages = []
+        for i in page_indices:
+            if i in pages_by_index:
+                assembled_pages.append(f'<metadata_page>{i + 1}</metadata_page>\n{pages_by_index[i]}')
+        return "\n\n".join(assembled_pages)
 
 
 _OVERLAY_TEXT = re.compile(

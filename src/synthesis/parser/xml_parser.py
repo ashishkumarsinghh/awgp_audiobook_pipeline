@@ -2,7 +2,7 @@ import re
 from src.synthesis.models.document import Document, TextBlock, SemanticTag
 
 class XMLParser:
-    TAGS = "book_title|heading|subheading|prose|paragraph|sentence|gloss|shloka|verse_line|stanza|mantra|chant_refrain|quote|dialogue|footnote|list_item|table|caption|transliteration|foreign_text|number_or_date"
+    TAGS = "book_title|heading|subheading|prose|paragraph|sentence|gloss|shloka|verse_line|stanza|mantra|chant_refrain|quote|dialogue|footnote|list_item|table|caption|transliteration|foreign_text|number_or_date|metadata_page"
 
     @staticmethod
     def parse(xml_text: str) -> Document:

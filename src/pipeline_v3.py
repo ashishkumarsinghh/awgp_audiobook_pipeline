@@ -344,15 +344,19 @@ class ProjectManager:
         if not segments:
             raise ValueError('No narration text found. Review OCR before segmentation.')
 
-        data = [
-            {
+        data = []
+        for i, seg in enumerate(segments):
+            chunk_dict = {
                 "id": f"chunk_{i+1:04d}",
                 "source_text": seg.source_text,
                 "segment_type": seg.segment_type,
                 "pause_after_ms": seg.pause_after_ms
             }
-            for i, seg in enumerate(segments)
-        ]
+            if seg.page is not None:
+                chunk_dict["page"] = seg.page
+            if seg.paragraph is not None:
+                chunk_dict["paragraph"] = seg.paragraph
+            data.append(chunk_dict)
 
 
 
@@ -403,9 +407,37 @@ class ProjectManager:
 
         segments = self.prosody.apply_prosody(segments)
 
-        out_data = [
-            {
-                "id": data[i]["id"],
+        ai_fixes_path = os.path.join(self.project_dir, 'ai_audio_fixes.json')
+        ai_fixes = []
+        if os.path.isfile(ai_fixes_path):
+            try:
+                with open(ai_fixes_path, 'r', encoding='utf-8') as f:
+                    ai_fixes = json.load(f)
+            except Exception as e:
+                print(f"[Warning] Could not parse {ai_fixes_path}: {e}")
+
+        out_data = []
+        for i, seg in enumerate(segments):
+            orig_item = data[i]
+            page_val = orig_item.get("page")
+            para_val = orig_item.get("paragraph")
+            
+            # Apply AI Audio Fixes
+            if page_val is not None:
+                for fix in ai_fixes:
+                    if fix.get("page") == page_val:
+                        if fix.get("paragraph") is not None and fix.get("paragraph") != para_val:
+                            continue
+                        
+                        find_text = fix.get("find_text", "")
+                        if find_text and find_text in seg.source_text:
+                            if "tts_override" in fix:
+                                seg.pronunciation_text = seg.pronunciation_text.replace(find_text, fix["tts_override"])
+                            if "pause_after_ms" in fix:
+                                seg.pause_after_ms = fix["pause_after_ms"]
+
+            chunk_dict = {
+                "id": orig_item["id"],
                 "source_text": seg.source_text,
                 "segment_type": seg.segment_type,
                 "pronunciation_text": seg.pronunciation_text,
@@ -415,8 +447,11 @@ class ProjectManager:
                 "pause_before_ms": seg.pause_before_ms,
                 "pause_after_ms": seg.pause_after_ms
             }
-            for i, seg in enumerate(segments)
-        ]
+            if page_val is not None:
+                chunk_dict["page"] = page_val
+            if para_val is not None:
+                chunk_dict["paragraph"] = para_val
+            out_data.append(chunk_dict)
 
 
 

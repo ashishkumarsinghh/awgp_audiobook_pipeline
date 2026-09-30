@@ -51,6 +51,8 @@ class SpeechSegment:
     pause_before_ms: int = 0
     pause_after_ms: int = 0
     audio_file: Optional[str] = None
+    page: Optional[int] = None
+    paragraph: Optional[int] = None
     
     def __repr__(self):
         return f"<Segment [{self.segment_type}] rate={self.rate} pitch={self.pitch} text='{self.source_text[:20]}...'>"

@@ -24,6 +24,7 @@ class SemanticTag(str, Enum):
     TRANSLITERATION = "transliteration"
     FOREIGN_TEXT = "foreign_text"
     NUMBER_OR_DATE = "number_or_date"
+    METADATA_PAGE = "metadata_page"
 
 @dataclass
 class TextBlock:

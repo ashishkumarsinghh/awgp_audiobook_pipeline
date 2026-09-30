@@ -81,15 +81,27 @@ class SemanticSegmenter:
 
         segments = []
         parsed_doc = XMLParser.parse(cleaned_text)
+        current_page = None
+        global_paragraph = 0
 
         for block in parsed_doc.blocks:
             tag = block.tag.value
+            
+            if tag == "metadata_page":
+                try:
+                    current_page = int(block.text.strip())
+                    global_paragraph = 0
+                except ValueError:
+                    pass
+                continue
+
             # Defensive check against non-narrative metadata blocks
             if is_metadata_block(tag, block.text):
                 continue
 
             paragraphs = [p.strip() for p in re.split(r"\n\s*\n", block.text) if p.strip()]
             for p_idx, paragraph in enumerate(paragraphs):
+                global_paragraph += 1
                 clean = self._clean_tags(paragraph)
                 if not clean:
                     continue
@@ -126,7 +138,7 @@ class SemanticSegmenter:
                                 else:
                                     # Never insert a pause mid-sentence if forced to split by max_chars
                                     pause = 0
-                                segments.append(SpeechSegment(chunk, chunk, chunk, segment_type=chunk_tag, pause_after_ms=pause))
+                                segments.append(SpeechSegment(chunk, chunk, chunk, segment_type=chunk_tag, pause_after_ms=pause, page=current_page, paragraph=global_paragraph))
                                 current = []
 
                         current.append(piece)
@@ -141,7 +153,7 @@ class SemanticSegmenter:
                             pause = pause_map.get(tag, 800)
                     else:
                         pause = 0
-                    segments.append(SpeechSegment(chunk, chunk, chunk, segment_type=final_tag, pause_after_ms=pause))
+                    segments.append(SpeechSegment(chunk, chunk, chunk, segment_type=final_tag, pause_after_ms=pause, page=current_page, paragraph=global_paragraph))
 
         return segments
 
