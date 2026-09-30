@@ -219,6 +219,16 @@
       "source": "निर्बल",
       "tts_alias": "निरबल",
       "context": "pronunciation fix"
+    },
+    {
+      "source": "बी० ए०",
+      "tts_alias": "बी ए",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "एम० ए०",
+      "tts_alias": "एम ए",
+      "context": "pronunciation fix"
     }
   ],
   "human_review_required": [

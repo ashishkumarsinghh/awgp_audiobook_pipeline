@@ -11,7 +11,8 @@ from src.synthesis.audio.io import validate_wav
 
 
 def fingerprint(item, provider, voice):
-    payload = {"version": 1, "provider": provider, "voice": voice, "segment": item}
+    item_no_id = {k: v for k, v in item.items() if k != "id"}
+    payload = {"version": 2, "provider": provider, "voice": voice, "segment": item_no_id}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -69,14 +70,52 @@ async def synthesize_segments(data, audio_dir, tts, provider, *, attempts=2, con
     old = load_manifest(audio_dir).get("chunks", {})
     if not isinstance(old, dict):
         old = {}
+        
+    available_old_chunks = {}
+    for old_id, old_record in old.items():
+        if old_record.get("status") == "complete":
+            fp = old_record.get("fingerprint")
+            if fp:
+                available_old_chunks.setdefault(fp, []).append(old_id)
+
     voice = tts.voice
     records = {}
+    
     for item in data:
         chunk_id = item["id"]
-        record = old.get(chunk_id, {})
-        records[chunk_id] = record if is_current(item, record, audio_dir, provider, voice) else {
-            "status": "pending", "fingerprint": fingerprint(item, provider, voice)
-        }
+        fp = fingerprint(item, provider, voice)
+        
+        old_record = old.get(chunk_id, {})
+        if old_record.get("status") == "complete" and old_record.get("fingerprint") == fp and is_current(item, old_record, audio_dir, provider, voice):
+            records[chunk_id] = old_record
+            if fp in available_old_chunks and chunk_id in available_old_chunks[fp]:
+                available_old_chunks[fp].remove(chunk_id)
+        else:
+            reused_id = None
+            if fp in available_old_chunks and available_old_chunks[fp]:
+                for cand_id in list(available_old_chunks[fp]):
+                    cand_record = old[cand_id]
+                    cand_path = audio_dir / f"{cand_id}.wav"
+                    try:
+                        validate_wav(cand_path)
+                        if cand_record.get("sha256") == audio_digest(cand_path):
+                            reused_id = cand_id
+                            available_old_chunks[fp].remove(cand_id)
+                            break
+                    except Exception:
+                        pass
+                        
+            if reused_id:
+                old_path = audio_dir / f"{reused_id}.wav"
+                new_path = audio_dir / f"{chunk_id}.wav"
+                if old_path != new_path:
+                    import shutil
+                    shutil.copy2(old_path, new_path)
+                records[chunk_id] = old[reused_id].copy()
+            else:
+                records[chunk_id] = {
+                    "status": "pending", "fingerprint": fp
+                }
 
     for item in data:
         record = records[item["id"]]
