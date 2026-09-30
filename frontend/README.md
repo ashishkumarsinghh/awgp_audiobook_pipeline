@@ -1,16 +1,45 @@
-# React + Vite
+# AWGP Audiobook Pipeline dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+This directory contains the React/Vite dashboard for editors and Checkers. The
+Python API in the repository root must be running before using the dashboard.
 
-Currently, two official plugins are available:
+## Local development
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+From this directory:
 
-## React Compiler
+~~~sh
+npm ci
+npm run dev
+~~~
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Open the local URL printed by Vite. During development, `/api` is proxied to
+`http://localhost:8000`; start the API in another terminal from the repository
+root:
 
-## Expanding the Oxlint configuration
+~~~sh
+uvicorn api:app --host 127.0.0.1 --port 8000
+~~~
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+For a separately hosted API, set `VITE_API_BASE` before `npm run dev` or
+`npm run build`.
+
+## Available commands
+
+- `npm run dev` — development server with hot reload.
+- `npm run build` — production build in `dist/`.
+- `npm run preview` — serve the production build locally.
+- `npm test` — frontend tests.
+- `npm run lint` — Oxlint checks.
+
+## Review workflow
+
+Sign in, open a project, and use the stage controls to monitor pipeline work.
+Editors can update OCR, segments, pronunciation, and prosody, then regenerate
+the affected stages. Checkers should listen to the current mastered candidate,
+create issues against that candidate, and submit a decision only after comparing
+the audio with the source book. When a later candidate is generated, unresolved
+issues are carried forward automatically; verify them on the new candidate before
+approval.
+
+See the repository [README](../README.md) and the [feedback workflow guide](../docs/feedback-workflow-implementation-guide.md)
+for setup, CLI recovery, candidate lineage, and conflict handling.

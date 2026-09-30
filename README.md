@@ -254,3 +254,68 @@ Before publishing, review:
 - hyphenated Hindi compounds sound natural;
 - chunk transitions contain no duplicate or abrupt pauses;
 - the final MP3 has been listened to end-to-end.
+
+## 8. Editor and Checker web workflow
+
+The API and React dashboard are intended for editors and Checkers who should not
+need to edit JSON files manually.
+
+Start the API from the repository root:
+
+~~~sh
+. venv/bin/activate
+uvicorn api:app --host 127.0.0.1 --port 8000
+~~~
+
+In a second terminal, start the dashboard:
+
+~~~sh
+cd frontend
+npm ci
+npm run dev
+~~~
+
+Open the URL printed by Vite (normally `http://localhost:5173`). The Vite
+development proxy forwards `/api` requests to the API on port 8000. For a
+different API host, set `VITE_API_BASE` before starting Vite.
+
+Typical roles are:
+
+1. An Editor creates or selects a project, starts the PDF pipeline, and corrects
+   OCR, segmentation, pronunciation, or prosody.
+2. The Editor runs the required downstream stages and creates a mastered review
+   candidate.
+3. A Checker listens while comparing the candidate with the textbook and records
+   each issue with page, segment, time range, severity, and notes.
+4. The Editor applies corrections and regenerates only the affected stages.
+5. The next mastered output becomes a new candidate. The previous candidate is
+   retained for audit, and unresolved issues are copied to the new candidate with
+   a parent link so they cannot disappear between review rounds.
+6. A Checker verifies the new candidate. `fixed_pending_check` issues remain
+   approval blockers until explicitly verified, resolved, or dismissed. Two
+   independent approvals are required before publication.
+
+Always select the candidate being reviewed when submitting an issue or decision.
+Historical candidate audio remains available for comparison, but decisions belong
+to the current candidate only.
+
+If another person edited the draft since a correction note was written, the API
+rejects the correction with a conflict. Reload the project, confirm the target
+text, preview the correction again, and then apply it.
+
+For the complete data model, API behavior, migration notes, and recovery rules,
+see [the feedback workflow implementation guide](docs/feedback-workflow-implementation-guide.md).
+
+## 9. Troubleshooting quick reference
+
+- **No audio is regenerated:** confirm the canonical file under `02_phonetics/`
+  changed, then run Stage 3 with `--force` only if the manifest is stale.
+- **A correction returns 409:** another draft revision exists; reload before
+  applying the correction.
+- **A Checker cannot approve:** inspect unresolved blocker issues, including
+  `fixed_pending_check`, on the current candidate.
+- **A run stops after interruption:** rerun the same stage. Checkpoints and the
+  audio manifest are designed to resume safely.
+- **OCR is uncertain:** resolve every `[???????]` marker before synthesis.
+- **The UI cannot reach the API:** confirm `uvicorn` is listening on port 8000,
+  or set `VITE_API_BASE` to the reachable API URL.
