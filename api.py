@@ -26,6 +26,7 @@ import uuid
 import unicodedata
 import secrets
 import bcrypt
+from pathlib import Path as FilePath
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 
@@ -33,7 +34,7 @@ from src.pipeline_v3 import ProjectManager
 from src.synthesis.providers import VOICE_CATALOG
 from src.synthesis.audio.io import validate_mp3
 from src.db.database import engine, Base, get_db
-from src.db.models import User, AuditLog, Project, Artifact, Candidate, ReviewIssue, ReviewDecision, Job
+from src.db.models import User, AuditLog, Project, Artifact, Candidate, ReviewIssue, ReviewDecision, Job, Correction
 from src.job_runner import process_job, start_worker
 
 # Init DB
@@ -55,6 +56,14 @@ with engine.begin() as _conn:
         _conn.execute(text("ALTER TABLE projects ADD COLUMN tts_voice VARCHAR DEFAULT 'hi-IN-SwaraNeural'"))
     if "active_job_id" not in _project_columns:
         _conn.execute(text("ALTER TABLE projects ADD COLUMN active_job_id INTEGER"))
+    if "version" not in _project_columns:
+        _conn.execute(text("ALTER TABLE projects ADD COLUMN version INTEGER NOT NULL DEFAULT 1"))
+    _candidate_columns = {c["name"] for c in inspect(engine).get_columns("candidates")}
+    if "predecessor_id" not in _candidate_columns:
+        _conn.execute(text("ALTER TABLE candidates ADD COLUMN predecessor_id INTEGER"))
+    _issue_columns = {c["name"] for c in inspect(engine).get_columns("review_issues")}
+    if "parent_issue_id" not in _issue_columns:
+        _conn.execute(text("ALTER TABLE review_issues ADD COLUMN parent_issue_id INTEGER"))
 
 _job_worker_thread = None
 _job_worker_stop = None
@@ -401,10 +410,27 @@ class ReviewIssueRequest(BaseModel):
     start_seconds: Optional[int] = None
     end_seconds: Optional[int] = None
     segment_id: Optional[str] = None
+    candidate_id: Optional[int] = None
 
 class ReviewDecisionRequest(BaseModel):
     decision: str
     summary: Optional[str] = None
+    candidate_id: Optional[int] = None
+
+class CorrectionTarget(BaseModel):
+    segment_id: str
+    expected_text: str
+    page_number: Optional[int] = None
+    paragraph: Optional[str] = None
+
+class CorrectionRequest(BaseModel):
+    base_version: int
+    candidate_id: Optional[int] = None
+    issue_id: Optional[int] = None
+    kind: str
+    target: CorrectionTarget
+    operation: Dict[str, Any]
+    reason: Optional[str] = None
 
 def _validate_tts_selection(provider: str, voice: Optional[str]) -> str:
     provider = "google" if provider == "gemini" else provider
@@ -804,8 +830,8 @@ def get_pdf(project_name: str, token: Optional[str] = Query(None), current_user:
 
 @app.get("/api/projects/{project_name}/raw")
 def get_raw_text(project_name: str, current_user: User = Depends(get_current_user)):
-    clean_path = os.path.join(PROJECTS_DIR, project_name, "02_text_cleaned.txt")
-    raw_path = os.path.join(PROJECTS_DIR, project_name, "01_ocr_raw.txt")
+    clean_path = os.path.join(PROJECTS_DIR, project_name, "00_ocr", "text_cleaned.txt")
+    raw_path = os.path.join(PROJECTS_DIR, project_name, "00_ocr", "ocr_raw.txt")
 
     clean_content = ""
     raw_content = ""
@@ -817,6 +843,19 @@ def get_raw_text(project_name: str, current_user: User = Depends(get_current_use
     if os.path.exists(raw_path):
         with open(raw_path, "r", encoding="utf-8") as f:
             raw_content = f.read()
+
+    # Read legacy aliases only for projects created before the canonical
+    # stage-folder layout was introduced.
+    if not clean_content:
+        legacy = os.path.join(PROJECTS_DIR, project_name, "02_text_cleaned.txt")
+        if os.path.isfile(legacy):
+            with open(legacy, encoding="utf-8") as stream:
+                clean_content = stream.read()
+    if not raw_content:
+        legacy = os.path.join(PROJECTS_DIR, project_name, "01_ocr_raw.txt")
+        if os.path.isfile(legacy):
+            with open(legacy, encoding="utf-8") as stream:
+                raw_content = stream.read()
 
     has_clean = bool(clean_content and not clean_content.startswith("OCR failed:"))
 
@@ -839,16 +878,26 @@ def save_raw_text(project_name: str, payload: dict, db: Session = Depends(get_db
         raise HTTPException(422, detail="Narration text cannot be empty.")
     p_dir = os.path.join(PROJECTS_DIR, project_name)
     os.makedirs(p_dir, exist_ok=True)
-    file_path = os.path.join(p_dir, "01_ocr_raw.txt")
+    # Stage folders are canonical. Keep the legacy root alias in sync only for
+    # compatibility with older CLI consumers.
+    file_path = os.path.join(p_dir, "00_ocr", "ocr_raw.txt")
+    legacy_path = os.path.join(p_dir, "01_ocr_raw.txt")
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
     previous = None
     if os.path.isfile(file_path):
         with open(file_path, encoding="utf-8") as stream:
             previous = stream.read()
+    elif os.path.isfile(legacy_path):
+        with open(legacy_path, encoding="utf-8") as stream:
+            previous = stream.read()
     if previous != text:
         atomic_write(file_path, text)
-        ProjectManager(p_dir).invalidate_after("raw" if file_path.endswith("01_ocr_raw.txt") else "clean")
+        atomic_write(legacy_path, text)
+        ProjectManager(p_dir).invalidate_after("raw")
         project = db.query(Project).filter(Project.name == project_name).first()
-        project.status = "01_OCR_Done"
+        if project:
+            project.status = "01_OCR_Done"
+            project.version = (project.version or 1) + 1
     save_artifact_record(db, project_name, "00_ocr_raw", "txt", file_path, current_user.username, current_user.id)
     log = AuditLog(project_name=project_name, stage="01_OCR_Done", action="SAVED RAW TEXT", user_id=current_user.id)
     db.add(log)
@@ -862,16 +911,24 @@ def save_clean_text(project_name: str, payload: dict, db: Session = Depends(get_
         raise HTTPException(422, detail="Narration text cannot be empty.")
     p_dir = os.path.join(PROJECTS_DIR, project_name)
     os.makedirs(p_dir, exist_ok=True)
-    file_path = os.path.join(p_dir, "02_text_cleaned.txt")
+    file_path = os.path.join(p_dir, "00_ocr", "text_cleaned.txt")
+    legacy_path = os.path.join(p_dir, "02_text_cleaned.txt")
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
     previous = None
     if os.path.isfile(file_path):
         with open(file_path, encoding="utf-8") as stream:
             previous = stream.read()
+    elif os.path.isfile(legacy_path):
+        with open(legacy_path, encoding="utf-8") as stream:
+            previous = stream.read()
     if previous != text:
         atomic_write(file_path, text)
-        ProjectManager(p_dir).invalidate_after("raw" if file_path.endswith("01_ocr_raw.txt") else "clean")
+        atomic_write(legacy_path, text)
+        ProjectManager(p_dir).invalidate_after("clean")
         project = db.query(Project).filter(Project.name == project_name).first()
-        project.status = "01_OCR_Done"
+        if project:
+            project.status = "01_OCR_Done"
+            project.version = (project.version or 1) + 1
     save_artifact_record(db, project_name, "01_text_cleaned", "txt", file_path, current_user.username, current_user.id)
     log = AuditLog(project_name=project_name, stage="01_OCR_Done", action="SAVED CLEANED TEXT", user_id=current_user.id)
     db.add(log)
@@ -882,8 +939,11 @@ def save_clean_text(project_name: str, payload: dict, db: Session = Depends(get_
 def get_segments(project_name: str, current_user: User = Depends(get_current_user)):
     pm = ProjectManager(os.path.join(PROJECTS_DIR, project_name))
 
-    if os.path.exists(pm.segments_file):
-        with open(pm.segments_file, "r", encoding="utf-8") as f:
+    target = os.path.join(pm.stage1_dir, "segments.json")
+    if not os.path.exists(target):
+        target = pm.segments_file
+    if os.path.exists(target):
+        with open(target, "r", encoding="utf-8") as f:
             return json.load(f)
     raise HTTPException(status_code=404, detail="No segments found. Run Segmentation (API stage 2).")
 
@@ -891,7 +951,8 @@ def get_segments(project_name: str, current_user: User = Depends(get_current_use
 @app.put("/api/projects/{project_name}/segments")
 def update_segments(project_name: str, updates: List[Dict[str, Any]], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     pm = ProjectManager(os.path.join(PROJECTS_DIR, project_name))
-    target_file = pm.segments_file
+    target_file = os.path.join(pm.stage1_dir, "segments.json")
+    legacy_file = pm.segments_file
 
     try:
         validate_segments(updates)
@@ -903,8 +964,12 @@ def update_segments(project_name: str, updates: List[Dict[str, Any]], db: Sessio
             previous = json.load(stream)
     if previous != updates:
         write_json(target_file, updates)
+        write_json(legacy_file, updates)
         pm.invalidate_after("segments")
-        db.query(Project).filter(Project.name == project_name).first().status = "02_Segmentation"
+        project = db.query(Project).filter(Project.name == project_name).first()
+        if project:
+            project.status = "02_Segmentation"
+            project.version = (project.version or 1) + 1
 
     save_artifact_record(db, project_name, "02_segments", "json", target_file, current_user.username, current_user.id)
     log = AuditLog(project_name=project_name, stage="02_Segmentation", action="UPDATED SEGMENTS", user_id=current_user.id)
@@ -915,31 +980,185 @@ def update_segments(project_name: str, updates: List[Dict[str, Any]], db: Sessio
 @app.get("/api/projects/{project_name}/phonetics")
 def get_phonetics(project_name: str, current_user: User = Depends(get_current_user)):
     pm = ProjectManager(os.path.join(PROJECTS_DIR, project_name))
-    if not os.path.exists(pm.phonetics_file):
+    target = os.path.join(pm.stage2_dir, "phonetics.json") if os.path.exists(os.path.join(pm.stage2_dir, "phonetics.json")) else pm.phonetics_file
+    if not os.path.exists(target):
         raise HTTPException(status_code=404, detail="No phonetics found. Run Stage 2.")
-    with open(pm.phonetics_file, "r", encoding="utf-8") as f:
+    with open(target, "r", encoding="utf-8") as f:
         return json.load(f)
 
 @app.put("/api/projects/{project_name}/phonetics")
 def update_phonetics(project_name: str, updates: List[Dict[str, Any]], db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     pm = ProjectManager(os.path.join(PROJECTS_DIR, project_name))
+    target_file = os.path.join(pm.stage2_dir, "phonetics.json")
     try:
         validate_segments(updates)
     except ValueError as exc:
         raise HTTPException(422, detail=str(exc))
     previous = None
-    if os.path.isfile(pm.phonetics_file):
-        with open(pm.phonetics_file, encoding="utf-8") as stream:
+    if os.path.isfile(target_file):
+        with open(target_file, encoding="utf-8") as stream:
             previous = json.load(stream)
     if previous != updates:
+        write_json(target_file, updates)
         write_json(pm.phonetics_file, updates)
         pm.invalidate_after("phonetics")
-        db.query(Project).filter(Project.name == project_name).first().status = "03_Phonetics"
-    save_artifact_record(db, project_name, "03_phonetics", "json", pm.phonetics_file, current_user.username, current_user.id)
+        project = db.query(Project).filter(Project.name == project_name).first()
+        if project:
+            project.status = "03_Phonetics"
+            project.version = (project.version or 1) + 1
+    save_artifact_record(db, project_name, "03_phonetics", "json", target_file, current_user.username, current_user.id)
     log = AuditLog(project_name=project_name, stage="03_Phonetics", action="UPDATED PHONETICS", user_id=current_user.id)
     db.add(log)
     db.commit()
     return {"status": "success"}
+
+
+def _load_json_list(path: str) -> list:
+    if not os.path.isfile(path):
+        raise HTTPException(404, detail="The requested draft does not exist. Run the preceding stage first.")
+    try:
+        with open(path, encoding="utf-8") as stream:
+            value = json.load(stream)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, detail="The draft is invalid; restore or regenerate it before applying a correction.") from exc
+    if not isinstance(value, list):
+        raise HTTPException(409, detail="The draft must contain a list of segments.")
+    return value
+
+
+def _find_correction_target(items: list, target: CorrectionTarget, field: str = "source_text") -> dict:
+    matches = [item for item in items if item.get("id") == target.segment_id]
+    if len(matches) != 1:
+        raise HTTPException(409, detail="The segment target no longer exists or is ambiguous. Refresh the draft and choose it again.")
+    item = matches[0]
+    if target.expected_text not in item.get(field, ""):
+        raise HTTPException(409, detail="The target text changed since this note was written. Refresh and preview the correction again.")
+    return item
+
+
+@app.post("/api/projects/{project_name}/corrections/preview")
+def preview_correction(project_name: str, payload: CorrectionRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if not project:
+        raise HTTPException(404, detail="Project not found")
+    if payload.base_version != (project.version or 1):
+        raise HTTPException(409, detail="The draft changed. Reload before previewing this correction.")
+    if payload.kind.startswith("source_"):
+        items = _load_json_list(os.path.join(PROJECTS_DIR, project_name, "01_segments", "segments.json"))
+    else:
+        items = _load_json_list(os.path.join(PROJECTS_DIR, project_name, "02_phonetics", "phonetics.json"))
+    target_field = "source_text" if payload.kind.startswith("source_") or payload.kind in ("prosody_set", "boundary_pause_set") else "pronunciation_text"
+    item = _find_correction_target(items, payload.target, target_field)
+    operation = payload.operation or {}
+    replacement = operation.get("replacement") or operation.get("pronunciation_text")
+    if payload.kind in ("source_replace", "pronunciation_replace") and not isinstance(replacement, str):
+        raise HTTPException(422, detail="A replacement string is required for this correction type.")
+    if payload.kind == "pronunciation_override" and not isinstance(replacement, str):
+        raise HTTPException(422, detail="pronunciation_override requires pronunciation_text or replacement.")
+    before = item.get("source_text", "") if payload.kind.startswith("source_") else item.get("pronunciation_text", item.get("source_text", ""))
+    after = replacement if payload.kind == "pronunciation_override" else (before.replace(payload.target.expected_text, replacement, 1) if isinstance(replacement, str) else before)
+    return {"status": "preview", "project": project_name, "base_version": project.version,
+            "segment_id": item.get("id"), "page": item.get("page"), "paragraph": item.get("paragraph"),
+            "before": before, "after": after, "tts_regeneration": payload.kind.startswith("pronunciation"),
+            "assembly_regeneration": True}
+
+
+@app.post("/api/projects/{project_name}/corrections")
+def apply_correction(project_name: str, payload: CorrectionRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    project = db.query(Project).filter(Project.name == project_name).first()
+    if not project:
+        raise HTTPException(404, detail="Project not found")
+    current_version = project.version or 1
+    if payload.base_version != current_version:
+        raise HTTPException(409, detail="The draft changed. Reload before applying this correction.")
+    if payload.kind not in {"source_replace", "pronunciation_replace", "pronunciation_override", "prosody_set", "boundary_pause_set"}:
+        raise HTTPException(422, detail="Unsupported correction type")
+    source_kind = payload.kind.startswith("source_")
+    target_path = os.path.join(PROJECTS_DIR, project_name, "01_segments", "segments.json" if source_kind else "../02_phonetics/phonetics.json")
+    target_path = os.path.realpath(target_path)
+    if source_kind:
+        target_path = os.path.join(PROJECTS_DIR, project_name, "01_segments", "segments.json")
+    else:
+        target_path = os.path.join(PROJECTS_DIR, project_name, "02_phonetics", "phonetics.json")
+    items = _load_json_list(target_path)
+    target_field = "source_text" if source_kind or payload.kind in ("prosody_set", "boundary_pause_set") else "pronunciation_text"
+    item = _find_correction_target(items, payload.target, target_field)
+    operation = payload.operation or {}
+    replacement = operation.get("replacement") or operation.get("pronunciation_text")
+    if payload.kind in ("source_replace", "pronunciation_replace", "pronunciation_override") and not isinstance(replacement, str):
+        raise HTTPException(422, detail="A replacement string is required for this correction type.")
+    if payload.kind == "source_replace":
+        item["source_text"] = item.get("source_text", "").replace(payload.target.expected_text, replacement, 1)
+        write_json(target_path, items)
+        write_json(os.path.join(PROJECTS_DIR, project_name, "03_segments.json"), items)
+        ProjectManager(os.path.join(PROJECTS_DIR, project_name)).invalidate_after("segments")
+    elif payload.kind == "pronunciation_replace":
+        base = item.get("pronunciation_text", item.get("source_text", ""))
+        item["pronunciation_text"] = base.replace(payload.target.expected_text, replacement, 1)
+        write_json(target_path, items)
+        write_json(os.path.join(PROJECTS_DIR, project_name, "04_phonetics.json"), items)
+        ProjectManager(os.path.join(PROJECTS_DIR, project_name)).invalidate_after("phonetics")
+    elif payload.kind == "pronunciation_override":
+        item["pronunciation_text"] = replacement
+        write_json(target_path, items)
+        write_json(os.path.join(PROJECTS_DIR, project_name, "04_phonetics.json"), items)
+        ProjectManager(os.path.join(PROJECTS_DIR, project_name)).invalidate_after("phonetics")
+    elif payload.kind in ("prosody_set", "boundary_pause_set"):
+        allowed = {key: operation[key] for key in ("rate", "pitch", "volume", "pause_before_ms", "pause_after_ms") if key in operation}
+        if not allowed:
+            raise HTTPException(422, detail="No supported prosody or pause fields supplied")
+        item.update(allowed)
+        write_json(target_path, items)
+        write_json(os.path.join(PROJECTS_DIR, project_name, "04_phonetics.json"), items)
+        ProjectManager(os.path.join(PROJECTS_DIR, project_name)).invalidate_after("phonetics")
+
+    project.version = current_version + 1
+    correction = Correction(project_name=project_name, base_version=current_version,
+                             candidate_id=payload.candidate_id, issue_id=payload.issue_id,
+                             kind=payload.kind, segment_id=payload.target.segment_id,
+                             expected_text=payload.target.expected_text,
+                             operation_json=json.dumps(payload.operation, ensure_ascii=False, sort_keys=True),
+                             created_by=current_user.id)
+    db.add(correction)
+    if payload.issue_id is not None:
+        issue = db.query(ReviewIssue).filter(
+            ReviewIssue.id == payload.issue_id,
+            ReviewIssue.project_name == project_name,
+        ).first()
+        if issue and issue.status in ("open", "reopened"):
+            issue.status = "fixed_pending_check"
+            issue.resolved_by, issue.resolved_at = None, None
+    db.add(AuditLog(project_name=project_name, stage="correction", action="CORRECTION APPLIED",
+                    details=payload.reason or payload.kind, user_id=current_user.id))
+    db.commit()
+    return {"status": "success", "correction_id": correction.id, "new_version": project.version,
+            "segment_id": payload.target.segment_id}
+
+_UNRESOLVED_REVIEW_STATUSES = ("open", "reopened", "fixed_pending_check")
+
+
+def _carry_forward_review_issues(stage_db: Session, previous_id: int, candidate_id: int) -> None:
+    """Copy unresolved findings to a regenerated candidate with explicit lineage."""
+    issues = stage_db.query(ReviewIssue).filter(
+        ReviewIssue.candidate_id == previous_id,
+        ReviewIssue.status.in_(_UNRESOLVED_REVIEW_STATUSES),
+    ).all()
+    for issue in issues:
+        stage_db.add(ReviewIssue(
+            project_name=issue.project_name,
+            candidate_id=candidate_id,
+            parent_issue_id=issue.id,
+            user_id=issue.user_id,
+            body=issue.body,
+            severity=issue.severity,
+            stage=issue.stage,
+            page_number=issue.page_number,
+            start_seconds=issue.start_seconds,
+            end_seconds=issue.end_seconds,
+            segment_id=issue.segment_id,
+            status=issue.status,
+        ))
+
 
 def _run_queued_stage(stage_num: str, stage_db: Session, project_name: str, pm: ProjectManager,
                       actor_id: int, actor_name: str, force: bool) -> str:
@@ -963,21 +1182,34 @@ def _run_queued_stage(stage_num: str, stage_db: Session, project_name: str, pm: 
         pm.run_stage_4_mastering(force=force)
         artifact_name = save_artifact_record(stage_db, project_name, "05_mastered", "mp3", pm.master_file, actor_name, actor_id)
         digest = _sha256_file(pm.master_file)
-        existing = stage_db.query(Candidate).filter(Candidate.project_name == project_name, Candidate.sha256 == digest).first()
+        existing = stage_db.query(Candidate).filter(
+            Candidate.project_name == project_name,
+            Candidate.sha256 == digest,
+            Candidate.status == "pending_review",
+        ).first()
         if existing:
             existing.artifact_filename = artifact_name or existing.artifact_filename
         else:
+            previous = stage_db.query(Candidate).filter(
+                Candidate.project_name == project_name,
+                Candidate.status != "superseded",
+            ).order_by(Candidate.created_at.desc(), Candidate.id.desc()).first()
             stage_db.query(Candidate).filter(
                 Candidate.project_name == project_name, Candidate.status == "pending_review"
             ).update({"status": "superseded"})
-            stage_db.add(Candidate(
+            candidate = Candidate(
                 project_name=project_name,
                 artifact_filename=artifact_name or os.path.basename(pm.master_file),
                 sha256=digest,
                 status="pending_review",
                 source_status="05_Mastered",
                 created_by=actor_id,
-            ))
+                predecessor_id=previous.id if previous else None,
+            )
+            stage_db.add(candidate)
+            stage_db.flush()
+            if previous:
+                _carry_forward_review_issues(stage_db, previous.id, candidate.id)
         return "05_Mastered"
     raise ValueError(f"Unsupported stage: {stage_num}")
 
@@ -995,7 +1227,14 @@ def _execute_queued_job(job_id: int, database_bind) -> str:
         actor_id = actor.id if actor else None
         actor_name = actor.username if actor else "system"
         pm = ProjectManager(os.path.join(PROJECTS_DIR, job.project_name), project.tts_provider, project.tts_voice)
-        stages = ["1", "2", "3", "4", "5"] if job.stage == "all" else [job.stage]
+        if job.stage == "all":
+            # A full rebuild reuses a reviewed source by default. OCR is an
+            # explicit intake operation; rerunning it would overwrite paper
+            # corrections and is only allowed with force or no source yet.
+            source_exists = os.path.isfile(os.path.join(PROJECTS_DIR, job.project_name, "00_ocr", "text_cleaned.txt")) or os.path.isfile(os.path.join(PROJECTS_DIR, job.project_name, "00_ocr", "ocr_raw.txt"))
+            stages = (["1", "2", "3", "4", "5"] if job.force or not source_exists else ["2", "3", "4", "5"])
+        else:
+            stages = [job.stage]
         final_status = project.status
         try:
             for stage_num in stages:
@@ -1139,8 +1378,24 @@ def restore_artifact(project_name: str, filename: str, db: Session = Depends(get
                    "02_segments": "03_segments.json", "03_phonetics": "04_phonetics.json"}.get(record.stage)
     if not target_name:
         raise HTTPException(422, detail="This artifact stage cannot be restored")
-    target = os.path.join(PROJECTS_DIR, project_name, target_name)
+    canonical_target = {
+        "00_ocr_raw": os.path.join(PROJECTS_DIR, project_name, "00_ocr", "ocr_raw.txt"),
+        "01_text_cleaned": os.path.join(PROJECTS_DIR, project_name, "00_ocr", "text_cleaned.txt"),
+        "02_segments": os.path.join(PROJECTS_DIR, project_name, "01_segments", "segments.json"),
+        "03_phonetics": os.path.join(PROJECTS_DIR, project_name, "02_phonetics", "phonetics.json"),
+    }
+    target = canonical_target.get(record.stage)
+    if not target:
+        raise HTTPException(422, detail="This artifact stage cannot be restored")
+    os.makedirs(os.path.dirname(target), exist_ok=True)
     shutil.copyfile(source, target)
+    # Maintain compatibility aliases without making them authoritative.
+    legacy_target = {"00_ocr_raw": "01_ocr_raw.txt", "01_text_cleaned": "02_text_cleaned.txt",
+                     "02_segments": "03_segments.json", "03_phonetics": "04_phonetics.json"}[record.stage]
+    source_text = FilePath(source).read_text(encoding="utf-8")
+    if record.file_type == "json":
+        source_text = json.dumps(json.loads(source_text), ensure_ascii=False, indent=2)
+    atomic_write(os.path.join(PROJECTS_DIR, project_name, legacy_target), source_text)
     pm = ProjectManager(os.path.join(PROJECTS_DIR, project_name))
     pm.invalidate_after({"00_ocr_raw": "raw", "01_text_cleaned": "clean", "02_segments": "segments", "03_phonetics": "phonetics"}[record.stage])
 
@@ -1153,6 +1408,7 @@ def restore_artifact(project_name: str, filename: str, db: Session = Depends(get
     project = db.query(Project).filter(Project.name == project_name).first()
     if project and record.stage in stage_status_map:
         project.status = stage_status_map[record.stage]
+        project.version = (project.version or 1) + 1
 
     db.add(AuditLog(project_name=project_name, stage=record.stage, action="RESTORED ARTIFACT AS DRAFT",
                     details=record.filename, user_id=current_user.id))
@@ -1169,18 +1425,20 @@ def _candidate_payload(candidate, db):
     decisions = db.query(ReviewDecision).filter(ReviewDecision.candidate_id == candidate.id).order_by(ReviewDecision.created_at.desc()).all()
     return {
         "id": candidate.id, "project_name": candidate.project_name,
+        "predecessor_id": candidate.predecessor_id,
         "artifact_filename": candidate.artifact_filename, "sha256": candidate.sha256,
         "status": candidate.status, "created_at": candidate.created_at.isoformat() if candidate.created_at else None,
-        "audio_url": f"/api/projects/{candidate.project_name}/review/audio",
+        "audio_url": f"/api/projects/{candidate.project_name}/review/audio?candidate_id={candidate.id}",
         "issues": [{"id": i.id, "body": i.body, "severity": i.severity, "status": i.status,
                     "stage": i.stage, "page_number": i.page_number, "start_seconds": i.start_seconds,
                     "end_seconds": i.end_seconds, "segment_id": i.segment_id,
+                    "parent_issue_id": i.parent_issue_id,
                     "created_at": i.created_at.isoformat() if i.created_at else None} for i in issues],
         "decisions": [{"id": d.id, "decision": d.decision, "summary": d.summary,
                        "user_id": d.user_id, "created_at": d.created_at.isoformat() if d.created_at else None} for d in decisions],
         "approval_count": len({d.user_id for d in decisions if d.decision == "approved"}),
         "required_approvals": 2,
-        "open_blockers": sum(1 for i in issues if i.status in ("open", "reopened") and i.severity == "blocker")
+        "open_blockers": sum(1 for i in issues if i.status in ("open", "reopened", "fixed_pending_check") and i.severity == "blocker")
     }
 
 @app.get("/api/projects/{project_name}/review")
@@ -1192,9 +1450,13 @@ def get_review(project_name: str, db: Session = Depends(get_db), current_user: U
     return _candidate_payload(candidate, db)
 
 @app.get("/api/projects/{project_name}/review/audio")
-def get_review_audio(project_name: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    candidate = db.query(Candidate).filter(Candidate.project_name == project_name,
-                                           Candidate.status != "superseded").order_by(Candidate.created_at.desc()).first()
+def get_review_audio(project_name: str, candidate_id: Optional[int] = Query(None), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    candidate_query = db.query(Candidate).filter(Candidate.project_name == project_name)
+    if candidate_id is None:
+        candidate_query = candidate_query.filter(Candidate.status != "superseded")
+    if candidate_id is not None:
+        candidate_query = candidate_query.filter(Candidate.id == candidate_id)
+    candidate = candidate_query.order_by(Candidate.created_at.desc()).first()
     if not candidate:
         raise HTTPException(404, detail="No review candidate exists")
     artifact_root = os.path.realpath(os.path.join(PROJECTS_DIR, project_name, "artifacts"))
@@ -1213,8 +1475,11 @@ def create_review_issue(project_name: str, payload: ReviewIssueRequest, db: Sess
         raise HTTPException(422, detail="Severity must be blocker, major or minor")
     if not payload.body.strip():
         raise HTTPException(422, detail="Comment cannot be empty")
-    candidate = db.query(Candidate).filter(Candidate.project_name == project_name,
-                                           Candidate.status == "pending_review").order_by(Candidate.created_at.desc()).first()
+    candidate_query = db.query(Candidate).filter(Candidate.project_name == project_name,
+                                           Candidate.status == "pending_review")
+    if payload.candidate_id is not None:
+        candidate_query = candidate_query.filter(Candidate.id == payload.candidate_id)
+    candidate = candidate_query.order_by(Candidate.created_at.desc()).first()
     if not candidate:
         raise HTTPException(409, detail="No pending review candidate")
     issue = ReviewIssue(project_name=project_name, candidate_id=candidate.id, user_id=current_user.id,
@@ -1229,13 +1494,13 @@ def create_review_issue(project_name: str, payload: ReviewIssueRequest, db: Sess
 
 @app.patch("/api/projects/{project_name}/review/issues/{issue_id}")
 def update_review_issue(project_name: str, issue_id: int, status: str = Form(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    if status not in ("open", "resolved", "dismissed", "reopened"):
+    if status not in ("open", "resolved", "dismissed", "reopened", "fixed_pending_check", "verified"):
         raise HTTPException(422, detail="Invalid issue status")
     issue = db.query(ReviewIssue).filter(ReviewIssue.id == issue_id, ReviewIssue.project_name == project_name).first()
     if not issue:
         raise HTTPException(404, detail="Review issue not found")
     issue.status = status
-    if status in ("resolved", "dismissed"):
+    if status in ("resolved", "dismissed", "verified"):
         issue.resolved_by, issue.resolved_at = current_user.id, datetime.now(timezone.utc)
     else:
         issue.resolved_by, issue.resolved_at = None, None
@@ -1246,13 +1511,16 @@ def update_review_issue(project_name: str, issue_id: int, status: str = Form(...
 def submit_review_decision(project_name: str, payload: ReviewDecisionRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if payload.decision not in ("approved", "changes_requested", "saved"):
         raise HTTPException(422, detail="Decision must be approved, changes_requested or saved")
-    candidate = db.query(Candidate).filter(Candidate.project_name == project_name,
-                                           Candidate.status == "pending_review").order_by(Candidate.created_at.desc()).first()
+    candidate_query = db.query(Candidate).filter(Candidate.project_name == project_name,
+                                           Candidate.status == "pending_review")
+    if payload.candidate_id is not None:
+        candidate_query = candidate_query.filter(Candidate.id == payload.candidate_id)
+    candidate = candidate_query.order_by(Candidate.created_at.desc()).first()
     if not candidate:
         raise HTTPException(409, detail="No pending review candidate")
     blockers = db.query(ReviewIssue).filter(ReviewIssue.candidate_id == candidate.id,
                                             ReviewIssue.severity == "blocker",
-                                            ReviewIssue.status.in_(["open", "reopened"])).count()
+                                            ReviewIssue.status.in_(["open", "reopened", "fixed_pending_check"])).count()
     if payload.decision == "approved" and blockers:
         raise HTTPException(409, detail=f"Resolve {blockers} blocking review issue(s) before approval")
     if payload.decision == "approved":

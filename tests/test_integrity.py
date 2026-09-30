@@ -64,7 +64,7 @@ def test_cache_invalidation(tmp_path, change):
     else:
         data[0]["pause_after_ms"] = 300
     run(data, tmp_path, provider)
-    assert len(provider.calls) == (2 if change == "voice" else 1)
+    assert len(provider.calls) == (2 if change == "voice" else (0 if change == "pause" else 1))
 
 
 def test_master_refuses_missing_and_unverified_audio(tmp_path):

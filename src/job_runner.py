@@ -75,12 +75,16 @@ def renew_lease(bind, job_id: int, worker_id: str) -> None:
             db.commit()
 
 
-def finish_job(bind, job_id: int, status: str, *, result_status: Optional[str] = None, error: Optional[str] = None) -> None:
+def finish_job(bind, job_id: int, status: str, *, worker_id: Optional[str] = None,
+               result_status: Optional[str] = None, error: Optional[str] = None) -> bool:
     now = _now()
     with Session(bind) as db:
-        job = db.query(Job).filter(Job.id == job_id).first()
+        query = db.query(Job).filter(Job.id == job_id)
+        if worker_id is not None:
+            query = query.filter(Job.worker_id == worker_id, Job.status == "running")
+        job = query.first()
         if not job:
-            return
+            return False
         job.status = status
         job.result_status = result_status
         job.error = error
@@ -90,6 +94,7 @@ def finish_job(bind, job_id: int, status: str, *, result_status: Optional[str] =
         if project:
             project.active_job_id = None
         db.commit()
+        return True
 
 
 def process_job(bind, executor: Callable[[int, object], Optional[str]], preferred_id: Optional[int] = None) -> bool:
@@ -116,12 +121,12 @@ def process_job(bind, executor: Callable[[int, object], Optional[str]], preferre
     try:
         result_status = executor(job_id, bind)
         try:
-            finish_job(bind, job_id, "succeeded", result_status=result_status)
+            finish_job(bind, job_id, "succeeded", worker_id=worker_id, result_status=result_status)
         except OperationalError:
             pass
     except Exception as exc:
         try:
-            finish_job(bind, job_id, "failed", error=f"{type(exc).__name__}: {exc}")
+            finish_job(bind, job_id, "failed", worker_id=worker_id, error=f"{type(exc).__name__}: {exc}")
         except OperationalError:
             pass
     finally:

@@ -156,3 +156,11 @@ def test_punctuation_only_ocr_blocks_are_not_narrated():
     assert "\u0935\u093e\u0938\u094d\u0924\u0935\u093f\u0915 \u0935\u093e\u0915\u094d\u092f" in cleaned
     assert "---" not in cleaned
     assert "<->" not in cleaned
+from src.normalize.text_cleaner import clean_book_headers_and_metadata
+
+
+def test_cleaner_preserves_narrated_contents_word_and_refrain():
+    text = "<chant_refrain>Repeat these words</chant_refrain>\n\n<prose>The contents of the box were precious.</prose>\n\n<chant_refrain>Repeat these words</chant_refrain>"
+    cleaned = clean_book_headers_and_metadata(text)
+    assert cleaned.count("Repeat these words") == 2
+    assert "contents of the box" in cleaned

@@ -6,6 +6,8 @@ import os
 import re
 import json
 import time
+import hashlib
+import tempfile
 from datetime import datetime
 import fitz
 from dotenv import load_dotenv
@@ -39,6 +41,9 @@ def extract_text_from_pdf(
         client = get_gemini_client()
         pages_by_index: Dict[int, str] = {}
         clean_book = re.sub(r'[^a-zA-Z0-9_-]', '_', book_name or os.path.splitext(os.path.basename(pdf_path))[0])
+        with open(pdf_path, "rb") as pdf_stream:
+            source_digest = hashlib.sha256(pdf_stream.read()).hexdigest()[:20]
+        checkpoint_prefix = f"{clean_book}_{source_digest}"
         if checkpoint_dir:
             os.makedirs(checkpoint_dir, exist_ok=True)
 
@@ -64,11 +69,26 @@ def extract_text_from_pdf(
                 page_file = None
 
                 if checkpoint_dir:
-                    page_file = os.path.join(checkpoint_dir, f"{clean_book}_page_{page_num:04d}.txt")
+                    page_file = os.path.join(checkpoint_dir, f"{checkpoint_prefix}_page_{page_num:04d}.txt")
+                    legacy_page_file = os.path.join(checkpoint_dir, f"{clean_book}_page_{page_num:04d}.txt")
                     if os.path.isfile(page_file):
                         try:
                             with open(page_file, "r", encoding="utf-8") as f:
                                 content = f.read()
+                                if content.strip():
+                                    cached_text = content
+                        except Exception:
+                            pass
+                    # Existing editors may have changed the legacy checkpoint
+                    # name. Adopt it only when it belongs to the current PDF
+                    # digest and is newer than the bound checkpoint.
+                    if os.path.isfile(legacy_page_file):
+                        try:
+                            manifest_path = os.path.join(checkpoint_dir, "ocr_manifest.json")
+                            manifest = json.loads(open(manifest_path, encoding="utf-8").read()) if os.path.isfile(manifest_path) else {}
+                            if manifest.get("source_sha256") == source_digest:
+                                with open(legacy_page_file, encoding="utf-8") as legacy_stream:
+                                    content = legacy_stream.read()
                                 if content.strip():
                                     cached_text = content
                         except Exception:
@@ -91,6 +111,11 @@ def extract_text_from_pdf(
                         try:
                             with open(page_file, "w", encoding="utf-8") as f:
                                 f.write(text)
+                            # Compatibility copy for existing tooling. Legacy
+                            # names are never read as checkpoints because they
+                            # lack source binding.
+                            with open(legacy_page_file, "w", encoding="utf-8") as f:
+                                f.write(text)
                         except Exception:
                             pass
                     if "<blank_page>" not in text:
@@ -108,10 +133,13 @@ def extract_text_from_pdf(
                 time.sleep(2.0)
 
                 for page_num, text in zip(batch_page_nums, texts):
-                    page_file = os.path.join(checkpoint_dir, f"{clean_book}_page_{page_num:04d}.txt") if checkpoint_dir else None
+                    page_file = os.path.join(checkpoint_dir, f"{checkpoint_prefix}_page_{page_num:04d}.txt") if checkpoint_dir else None
                     if page_file:
                         try:
                             with open(page_file, "w", encoding="utf-8") as f:
+                                f.write(text)
+                            legacy_page_file = os.path.join(checkpoint_dir, f"{clean_book}_page_{page_num:04d}.txt")
+                            with open(legacy_page_file, "w", encoding="utf-8") as f:
                                 f.write(text)
                         except Exception:
                             pass
@@ -124,13 +152,22 @@ def extract_text_from_pdf(
         if checkpoint_dir:
             manifest_path = os.path.join(checkpoint_dir, "ocr_manifest.json")
             try:
-                with open(manifest_path, "w", encoding="utf-8") as f:
-                    json.dump({
-                        "book_name": clean_book,
-                        "total_pages": len(page_indices),
-                        "completed_pages": len(pages),
-                        "timestamp": datetime.now().isoformat()
-                    }, f, indent=2)
+                payload = {
+                    "book_name": clean_book,
+                    "source_sha256": source_digest,
+                    "total_pages": len(page_indices),
+                    "completed_pages": len(pages_by_index),
+                    "pages": sorted(page_indices),
+                    "timestamp": datetime.now().isoformat()
+                }
+                fd, temporary = tempfile.mkstemp(prefix=".ocr-manifest.", dir=checkpoint_dir)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(payload, f, ensure_ascii=False, indent=2)
+                    os.replace(temporary, manifest_path)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
             except Exception:
                 pass
 

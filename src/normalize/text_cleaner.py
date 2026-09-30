@@ -110,7 +110,10 @@ def _line_without_tags(line: str) -> str:
 def _is_toc_block(content: str) -> bool:
     value = _line_without_tags(content)
     numbered_items = re.findall(r"(?:^|\s)[\u0966-\u096f\d]{1,3}\s*[.)-]\s+", value)
-    return bool(_TOC_MARKER.search(value) or len(numbered_items) >= 5)
+    # Match a contents heading as a block label, not the ordinary English
+    # word “contents” inside a narrated sentence.
+    contents_heading = re.fullmatch(r"\s*(?:contents|table\s+of\s+contents)\s*[:：-]?\s*", value, re.IGNORECASE)
+    return bool(contents_heading or re.search(r"^\s*(?:विषय\s*[-–—]?\s*सूची|अनुक्रमणिका)\s*$", value) or len(numbered_items) >= 5)
 
 def _is_artifact_block(content: str) -> bool:
     value = _line_without_tags(content)
@@ -136,23 +139,11 @@ def _furniture_key(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().casefold()
 
 def _find_repeated_furniture(blocks: List[Tuple[str, str]]) -> List[Tuple[str, re.Pattern]]:
-    counts = {}
-    originals = {}
-    for _, content in blocks:
-        key = _furniture_key(content)
-        if 4 <= len(key) <= 120 and not re.search(r"[\u0964\u0965!?]", key):
-            counts[key] = counts.get(key, 0) + 1
-            originals.setdefault(key, _line_without_tags(content))
-    result = []
-    for key, count in counts.items():
-        if count >= 2:
-            result.append((key, re.compile(
-                r"[\s\[\](){}|\-]*[\u0966-\u096f\d]{0,4}[\s\[\](){}|\-]*"
-                + re.escape(originals[key]) +
-                r"[\s\[\](){}|\-]*[\u0966-\u096f\d]{0,4}",
-                re.IGNORECASE,
-            )))
-    return result
+    # Repeated text is not evidence of furniture: chants, refrains and prose
+    # deliberately repeat. Header removal is handled by explicit page/layout
+    # metadata and artifact rules; never delete a block solely because it is
+    # repeated.
+    return []
 
 def _is_artifact_line(line: str) -> bool:
     value = _line_without_tags(line)

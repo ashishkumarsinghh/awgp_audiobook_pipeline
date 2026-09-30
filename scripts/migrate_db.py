@@ -19,6 +19,7 @@ def migrate(database):
             "book_identifier": "ALTER TABLE projects ADD COLUMN book_identifier VARCHAR",
             "display_name": "ALTER TABLE projects ADD COLUMN display_name VARCHAR",
             "active_job_id": "ALTER TABLE projects ADD COLUMN active_job_id INTEGER",
+            "version": "ALTER TABLE projects ADD COLUMN version INTEGER NOT NULL DEFAULT 1",
         }
         statements = [project_migrations[name] for name in project_migrations if name not in project_columns]
 
@@ -43,6 +44,39 @@ def migrate(database):
                     started_at DATETIME,
                     finished_at DATETIME,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )"""
+            )
+
+        candidate_table = source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='candidates'").fetchone()
+        if candidate_table:
+            candidate_columns = {row[1] for row in source.execute("PRAGMA table_info(candidates)")}
+            if "predecessor_id" not in candidate_columns:
+                statements.append("ALTER TABLE candidates ADD COLUMN predecessor_id INTEGER")
+        issue_table = source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_issues'").fetchone()
+        if issue_table:
+            issue_columns = {row[1] for row in source.execute("PRAGMA table_info(review_issues)")}
+            if "parent_issue_id" not in issue_columns:
+                statements.append("ALTER TABLE review_issues ADD COLUMN parent_issue_id INTEGER")
+
+        corrections_table = source.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='corrections'"
+        ).fetchone()
+        if not corrections_table:
+            statements.append(
+                """CREATE TABLE corrections (
+                    id INTEGER PRIMARY KEY,
+                    project_name VARCHAR NOT NULL,
+                    base_version INTEGER NOT NULL,
+                    candidate_id INTEGER,
+                    issue_id INTEGER,
+                    kind VARCHAR NOT NULL,
+                    segment_id VARCHAR,
+                    expected_text TEXT,
+                    operation_json TEXT NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'applied',
+                    conflict_detail TEXT,
+                    created_by INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )"""
             )
 

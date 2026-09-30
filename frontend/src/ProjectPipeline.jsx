@@ -168,7 +168,7 @@ function ProjectPipeline() {
     mutationFn: async () => {
       const res = await fetch(`${API_BASE}/api/projects/${project}/review/issues`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
-        body: JSON.stringify({ body: reviewComment, severity: reviewSeverity, start_seconds: Math.floor(reviewTimestamp) })
+        body: JSON.stringify({ body: reviewComment, severity: reviewSeverity, start_seconds: Math.floor(reviewTimestamp), candidate_id: reviewData?.id || undefined })
       })
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Could not save review issue') }
       return res.json()
@@ -180,7 +180,7 @@ function ProjectPipeline() {
     mutationFn: async (decision) => {
       const res = await fetch(`${API_BASE}/api/projects/${project}/review/decision`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${user.token}` },
-        body: JSON.stringify({ decision })
+        body: JSON.stringify({ decision, candidate_id: reviewData?.id || undefined })
       })
       if (!res.ok) { const err = await res.json(); throw new Error(err.detail || 'Could not save review decision') }
       return res.json()

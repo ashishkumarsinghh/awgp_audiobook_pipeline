@@ -30,6 +30,8 @@ class Project(Base):
     # Database-backed lease owner for durable stage execution. This replaces
     # process-local serialization when multiple API workers share the DB.
     active_job_id = Column(Integer, nullable=True, index=True)
+    # Optimistic concurrency/version for source, plan and correction writes.
+    version = Column(Integer, default=1, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -65,6 +67,7 @@ class Candidate(Base):
     status = Column(String, default="pending_review", index=True)  # pending_review, approved, superseded
     source_status = Column(String, nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    predecessor_id = Column(Integer, ForeignKey("candidates.id"), nullable=True, index=True)
     created_at = Column(DateTime, server_default=func.now(), index=True)
 
 class ReviewIssue(Base):
@@ -75,7 +78,7 @@ class ReviewIssue(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     body = Column(Text, nullable=False)
     severity = Column(String, default="major")  # blocker, major, minor
-    status = Column(String, default="open", index=True)  # open, resolved, dismissed, reopened
+    status = Column(String, default="open", index=True)  # open, reopened, fixed_pending_check, verified, resolved, dismissed
     stage = Column(String, nullable=True)
     page_number = Column(Integer, nullable=True)
     start_seconds = Column(Integer, nullable=True)
@@ -84,6 +87,7 @@ class ReviewIssue(Base):
     created_at = Column(DateTime, server_default=func.now(), index=True)
     resolved_at = Column(DateTime, nullable=True)
     resolved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    parent_issue_id = Column(Integer, ForeignKey("review_issues.id"), nullable=True, index=True)
 
 class ReviewDecision(Base):
     __tablename__ = "review_decisions"
@@ -93,6 +97,24 @@ class ReviewDecision(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     decision = Column(String, nullable=False)  # approved, changes_requested, saved
     summary = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
+
+
+class Correction(Base):
+    """Immutable, typed editorial feedback applied to a project draft."""
+    __tablename__ = "corrections"
+    id = Column(Integer, primary_key=True, index=True)
+    project_name = Column(String, ForeignKey("projects.name"), index=True, nullable=False)
+    base_version = Column(Integer, nullable=False)
+    candidate_id = Column(Integer, ForeignKey("candidates.id"), nullable=True, index=True)
+    issue_id = Column(Integer, ForeignKey("review_issues.id"), nullable=True, index=True)
+    kind = Column(String, nullable=False)
+    segment_id = Column(String, nullable=True, index=True)
+    expected_text = Column(Text, nullable=True)
+    operation_json = Column(Text, nullable=False)
+    status = Column(String, default="applied", nullable=False, index=True)  # applied, conflict, superseded
+    conflict_detail = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, server_default=func.now(), index=True)
 
 

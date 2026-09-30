@@ -208,13 +208,14 @@ class ProjectManager:
         """Remove derived active artifacts; keep immutable history in artifacts/ and reusable audio."""
         downstream = {
             "raw": [
-                self.segments_file, self.phonetics_file, self.master_file,
+                self.clean_file, self.segments_file, self.phonetics_file, self.master_file, self.named_master_file,
+                os.path.join(self.stage0_dir, 'text_cleaned.txt'),
                 os.path.join(self.stage1_dir, 'segments.json'),
                 os.path.join(self.stage2_dir, 'phonetics.json'),
                 os.path.join(self.stage4_dir, 'mastered.mp3'),
             ],
             "clean": [
-                self.segments_file, self.phonetics_file, self.master_file,
+                self.segments_file, self.phonetics_file, self.master_file, self.named_master_file,
                 os.path.join(self.stage1_dir, 'segments.json'),
                 os.path.join(self.stage2_dir, 'phonetics.json'),
                 os.path.join(self.stage4_dir, 'mastered.mp3'),
@@ -226,6 +227,7 @@ class ProjectManager:
             ],
             "phonetics": [
                 self.master_file,
+                self.named_master_file,
                 os.path.join(self.stage4_dir, 'mastered.mp3'),
             ],
         }
@@ -379,7 +381,7 @@ class ProjectManager:
         s1_seg = os.path.join(self.stage1_dir, 'segments.json')
 
         # Pick the latest edited segments file
-        target_in = input_segments_file or get_latest_file(s1_seg, self.segments_file)
+        target_in = input_segments_file or (s1_seg if os.path.isfile(s1_seg) else self.segments_file)
         if not target_in or not os.path.isfile(target_in):
             raise FileNotFoundError(f"Segments file not found in {self.stage1_dir} or {self.project_dir}. Run Stage 1 (Segmentation) first.")
 
@@ -474,7 +476,7 @@ class ProjectManager:
         s2_ph = os.path.join(self.stage2_dir, 'phonetics.json')
 
         # Pick the latest edited phonetics file
-        target_in = input_phonetics_file or get_latest_file(s2_ph, self.phonetics_file)
+        target_in = input_phonetics_file or (s2_ph if os.path.isfile(s2_ph) else self.phonetics_file)
         if not target_in or not os.path.isfile(target_in):
             raise FileNotFoundError(f"Phonetics file not found in {self.stage2_dir} or {self.project_dir}. Run Stage 2 (Phonetics) first.")
 
@@ -515,7 +517,7 @@ class ProjectManager:
         """Stage 4 (Mastering): Validates chunks from 03_audio/, assembles studio-grade master to 04_master/<book_name>.mp3."""
         s2_ph = os.path.join(self.stage2_dir, 'phonetics.json')
 
-        target_in = input_phonetics_file or get_latest_file(s2_ph, self.phonetics_file)
+        target_in = input_phonetics_file or (s2_ph if os.path.isfile(s2_ph) else self.phonetics_file)
         if not target_in or not os.path.isfile(target_in):
             raise FileNotFoundError(f"Phonetics file not found. Run Stage 2 first.")
 
@@ -895,7 +897,11 @@ Resumability:
     if args.all:
         target_stage = "all"
 
-    inferred_book, inferred_project = infer_book_and_project(args.project or target_book)
+    if args.project:
+        inferred_project = normalize_cli_path(args.project)
+        inferred_book = args.book_name or os.path.basename(os.path.normpath(inferred_project))
+    else:
+        inferred_book, inferred_project = infer_book_and_project(target_book)
     if not inferred_project:
         print("Error: Could not determine book project. Please specify a book name or PDF file.")
         print("Usage: python run.py <book_name> <stage>")
@@ -920,7 +926,9 @@ Resumability:
     if str(target_stage).lower() == "all":
         print(f"=== Running Full Pipeline for '{manager.book_name}' in '{manager.project_dir}' ===")
         pdf_input = cli_input if (cli_input and cli_input.lower().endswith(".pdf")) else None
-        manager.run_stage_1_ocr(input_pdf=pdf_input, max_pages=args.max_pages, pages_to_process=pages_to_process)
+        existing_source = os.path.isfile(os.path.join(manager.stage0_dir, "text_cleaned.txt")) or os.path.isfile(os.path.join(manager.stage0_dir, "ocr_raw.txt"))
+        if args.force or pdf_input or not existing_source:
+            manager.run_stage_1_ocr(input_pdf=pdf_input, max_pages=args.max_pages, pages_to_process=pages_to_process)
         manager.run_stage_1_segmentation(force=args.force)
         manager.run_stage_2_phonetics(force=args.force)
         manager.run_stage_3_audio(audio_dir=args.audio_dir)

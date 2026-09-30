@@ -34,3 +34,21 @@ def test_project_job_lease_serializes_and_reclaims(tmp_path):
     assert reclaimed is not None
     with Session(engine) as db:
         assert db.query(Job).filter(Job.id == reclaimed[0]).one().attempts == 1
+
+
+def test_expired_worker_cannot_finish_reclaimed_job(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'fenced.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(bind=engine)
+    with Session(engine) as db:
+        db.add(Project(name="book"))
+        db.add(Job(project_name="book", stage="4", status="queued"))
+        db.commit()
+    first = claim_job(engine)
+    with Session(engine) as db:
+        db.query(Job).filter(Job.id == first[0]).update({"lease_until": datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)})
+        db.commit()
+    second = claim_job(engine)
+    assert second and second[1] != first[1]
+    assert finish_job(engine, first[0], "succeeded", worker_id=first[1]) is False
+    with Session(engine) as db:
+        assert db.query(Job).filter(Job.id == second[0]).one().status == "running"

@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import tempfile
+import shutil
+import uuid
 from pathlib import Path
 from src.core.artifacts import write_json, validate_segments
 from src.core.types import SpeechSegment
@@ -11,8 +13,18 @@ from src.synthesis.audio.io import validate_wav
 
 
 def fingerprint(item, provider, voice):
-    item_no_id = {k: v for k, v in item.items() if k != "id"}
-    payload = {"version": 2, "provider": provider, "voice": voice, "segment": item_no_id}
+    # Editorial provenance and ordering must not invalidate speech. Boundary
+    # pauses belong to assembly; only effective speech inputs belong here.
+    speech_fields = {
+        "source_text": item.get("source_text", ""),
+        "normalized_text": item.get("normalized_text", item.get("source_text", "")),
+        "pronunciation_text": item.get("pronunciation_text", item.get("source_text", "")),
+        "segment_type": item.get("segment_type", "prose"),
+        "rate": item.get("rate", "+0%"),
+        "pitch": item.get("pitch", "+0Hz"),
+        "volume": item.get("volume", "+0%"),
+    }
+    payload = {"version": 3, "provider": provider, "voice": voice, "segment": speech_fields}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -72,11 +84,20 @@ async def synthesize_segments(data, audio_dir, tts, provider, *, attempts=2, con
         old = {}
         
     available_old_chunks = {}
+    source_snapshots = {}
     for old_id, old_record in old.items():
         if old_record.get("status") == "complete":
             fp = old_record.get("fingerprint")
             if fp:
                 available_old_chunks.setdefault(fp, []).append(old_id)
+                candidate = audio_dir / f"{old_id}.wav"
+                if candidate.is_file():
+                    snapshot = audio_dir / f".source-{old_id}-{uuid.uuid4().hex}.wav"
+                    try:
+                        shutil.copy2(candidate, snapshot)
+                        source_snapshots[old_id] = snapshot
+                    except OSError:
+                        pass
 
     voice = tts.voice
     records = {}
@@ -95,7 +116,7 @@ async def synthesize_segments(data, audio_dir, tts, provider, *, attempts=2, con
             if fp in available_old_chunks and available_old_chunks[fp]:
                 for cand_id in list(available_old_chunks[fp]):
                     cand_record = old[cand_id]
-                    cand_path = audio_dir / f"{cand_id}.wav"
+                    cand_path = source_snapshots.get(cand_id, audio_dir / f"{cand_id}.wav")
                     try:
                         validate_wav(cand_path)
                         if cand_record.get("sha256") == audio_digest(cand_path):
@@ -106,10 +127,12 @@ async def synthesize_segments(data, audio_dir, tts, provider, *, attempts=2, con
                         pass
                         
             if reused_id:
-                old_path = audio_dir / f"{reused_id}.wav"
+                old_path = source_snapshots.get(reused_id, audio_dir / f"{reused_id}.wav")
                 new_path = audio_dir / f"{chunk_id}.wav"
                 if old_path != new_path:
-                    import shutil
+                    # Snapshot the source before assigning any destination.
+                    # Cyclic reorders must never overwrite another source that
+                    # a later chunk still needs.
                     shutil.copy2(old_path, new_path)
                 records[chunk_id] = old[reused_id].copy()
             else:
@@ -170,5 +193,10 @@ async def synthesize_segments(data, audio_dir, tts, provider, *, attempts=2, con
 
     await asyncio.gather(*(generate(item) for item in data))
     failures = [f"{key}: {record.get('error', record['status'])}" for key, record in records.items() if record["status"] != "complete"]
+    for snapshot in source_snapshots.values():
+        try:
+            snapshot.unlink()
+        except OSError:
+            pass
     if failures:
         raise RuntimeError("Narration incomplete. Retry Audio to resume verified chunks. " + "; ".join(failures))
