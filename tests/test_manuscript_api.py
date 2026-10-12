@@ -28,6 +28,11 @@ def test_manuscript_api_uses_authoritative_workspace(client, db_session, tmp_pat
         assert fetched.status_code == 200
         assert fetched.json()["passages"][0]["text"] == "पहला पाठ"
 
+        found = client.get(f"/api/projects/{project_name}/manuscript/search",
+                           params={"query": "पहला"}, headers=headers)
+        assert found.status_code == 200
+        assert found.json()["matches"][0]["id"] == "p_one"
+
         updated = manuscript.replace("पहला पाठ", "बदला हुआ पाठ")
         saved = client.put(f"/api/projects/{project_name}/manuscript",
                            json={"content": updated}, headers=headers)

@@ -328,6 +328,10 @@ npm ci
 npm run dev
 ~~~
 
+On Windows, `python dev.py` (or `start.bat`) starts both services and keeps them
+running together. `start.ps1 -UseWSL` is available when the backend environment
+is installed in WSL.
+
 Open the URL printed by Vite (normally `http://localhost:5173`). The Vite
 development proxy forwards `/api` requests to the API on port 8000. For a
 different API host, set `VITE_API_BASE` before starting Vite.

@@ -831,6 +831,28 @@ def get_manuscript(project_name: str, current_user: User = Depends(get_current_u
             "revision": read_json(ws.home / "draft.json", {}).get("revision")}
 
 
+@app.get("/api/projects/{project_name}/manuscript/search")
+def search_manuscript(project_name: str, query: str = Query(""), version: Optional[str] = Query(None),
+                      current_user: User = Depends(get_current_user)):
+    ws = _editorial_workspace(project_name)
+    try:
+        return {"matches": ws.locate(query, version)}
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+
+
+@app.get("/api/projects/{project_name}/manuscript/preview")
+def preview_manuscript(project_name: str, query: str = Query(..., min_length=1),
+                       current_user: User = Depends(get_current_user)):
+    ws = _editorial_workspace(project_name)
+    try:
+        with ws.lock():
+            path = ws.preview(_editorial_manager(ws, project_name), query)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+    return FileResponse(path, media_type="audio/mpeg", filename=path.name)
+
+
 @app.put("/api/projects/{project_name}/manuscript")
 def save_manuscript(project_name: str, payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     content = payload.get("content")

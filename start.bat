@@ -1,7 +1,9 @@
 @echo off
+setlocal
+cd /d "%~dp0"
 echo ======================================================
 echo    AWGP Audiobook Production Pipeline Launcher
 echo ======================================================
-echo Starting WSL backend and frontend services...
-wsl -e bash -c "cd ~/projects/awgp_audiobook_pipeline && ./start.sh"
-pause
+echo Launching services on Windows...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0start.ps1" %*
+endlocal

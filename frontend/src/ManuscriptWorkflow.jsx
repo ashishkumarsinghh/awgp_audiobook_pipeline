@@ -19,6 +19,9 @@ export default function ManuscriptWorkflow({ project, token, projectDetails }) {
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
+  const [search, setSearch] = useState('')
+  const [matches, setMatches] = useState([])
+  const [previewUrl, setPreviewUrl] = useState('')
 
   const load = async () => {
     const data = await request(`/api/projects/${encodeURIComponent(project)}/manuscript`, {}, token)
@@ -29,6 +32,45 @@ export default function ManuscriptWorkflow({ project, token, projectDetails }) {
   useEffect(() => {
     load().catch((err) => setError(err.message))
   }, [project])
+
+  useEffect(() => () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl)
+  }, [previewUrl])
+
+  const find = async () => {
+    if (!search.trim()) return
+    setBusy('find')
+    setError('')
+    try {
+      const data = await request(`/api/projects/${encodeURIComponent(project)}/manuscript/search?query=${encodeURIComponent(search)}`, {}, token)
+      setMatches(data.matches || [])
+      if (!data.matches?.length) setMessage('No exact or fuzzy matches found.')
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const preview = async (passageId) => {
+    setBusy(`preview:${passageId}`)
+    setError('')
+    try {
+      const response = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(project)}/manuscript/preview?query=${encodeURIComponent(passageId)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.detail || 'Preview failed')
+      }
+      if (previewUrl) URL.revokeObjectURL(previewUrl)
+      setPreviewUrl(URL.createObjectURL(await response.blob()))
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy('')
+    }
+  }
 
   const run = async (action) => {
     setBusy(action)
@@ -75,6 +117,14 @@ export default function ManuscriptWorkflow({ project, token, projectDetails }) {
         </div>
         {error && <div className="mb-4 rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">{error}</div>}
         {message && <div className="mb-4 rounded-md bg-green-50 border border-green-200 px-4 py-3 text-sm text-green-700 flex items-center gap-2"><CheckCircleIcon className="w-4 h-4" />{message}</div>}
+        <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4 mb-4">
+          <div className="flex gap-2">
+            <input value={search} onChange={(event) => setSearch(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && find()} placeholder="Find a phrase, passage ID, or page (p35)" className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm" />
+            <button onClick={find} disabled={!search.trim() || Boolean(busy)} className="px-4 py-2 rounded-md bg-slate-800 text-white text-xs font-semibold disabled:opacity-50">{busy === 'find' ? 'Finding…' : 'Find'}</button>
+          </div>
+          {matches.length > 0 && <div className="mt-3 space-y-2">{matches.map((match) => <div key={match.id} className="flex items-start justify-between gap-3 rounded-md bg-slate-50 p-3 text-xs"><div><div className="font-semibold text-slate-800">{match.id} · page {match.page} · match {match.score}</div><div className="mt-1 text-slate-600 whitespace-pre-wrap">{match.text}</div></div><button onClick={() => preview(match.id)} disabled={Boolean(busy)} className="shrink-0 rounded-md border border-indigo-200 px-2 py-1 text-indigo-700 font-semibold disabled:opacity-50">{busy === `preview:${match.id}` ? 'Preparing…' : 'Preview'}</button></div>)}</div>}
+          {previewUrl && <audio className="mt-3 w-full" controls src={previewUrl} />}
+        </div>
         <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-4">
           <div className="flex items-center justify-between mb-3">
             <h2 className="font-semibold text-slate-900">Authoritative manuscript</h2>

@@ -21,26 +21,49 @@ echo -e "${BLUE}======================================================${NC}"
 echo -e "${GREEN}    AWGP Audiobook Production Pipeline Launcher       ${NC}"
 echo -e "${BLUE}======================================================${NC}"
 
+# Portable function to free ports (supports fuser on Linux, lsof on macOS/BSD/Git Bash)
+free_port() {
+    local port=$1
+    if command -v fuser >/dev/null 2>&1; then
+        fuser -k "${port}/tcp" 2>/dev/null || true
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -ti:"${port}" | xargs kill -9 2>/dev/null || true
+    fi
+}
+
 # Clean any existing orphaned processes on ports 8000 and 5173
 echo -e "${YELLOW}[1/4] Checking and freeing ports 8000 and 5173...${NC}"
-fuser -k 8000/tcp 2>/dev/null || true
-fuser -k 5173/tcp 2>/dev/null || true
+free_port 8000
+free_port 5173
 
-# Activate Python Virtual Environment
+# Activate Python Virtual Environment (supports Linux/macOS bin/ and Windows/Git Bash Scripts/)
 echo -e "${YELLOW}[2/4] Activating Python virtual environment...${NC}"
-if [ -d "venv" ]; then
+if [ -f "venv/bin/activate" ]; then
     source venv/bin/activate
-elif [ -d "../venv" ]; then
+elif [ -f "venv/Scripts/activate" ]; then
+    source venv/Scripts/activate
+elif [ -f ".venv/bin/activate" ]; then
+    source .venv/bin/activate
+elif [ -f ".venv/Scripts/activate" ]; then
+    source .venv/Scripts/activate
+elif [ -f "../venv/bin/activate" ]; then
     source ../venv/bin/activate
+elif [ -f "../venv/Scripts/activate" ]; then
+    source ../venv/Scripts/activate
+elif command -v uvicorn >/dev/null 2>&1; then
+    echo -e "${YELLOW}      Using system/active Python environment...${NC}"
 else
-    echo -e "${RED}Error: Virtual environment (venv) not found! Run: python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt${NC}"
+    echo -e "${RED}Error: Virtual environment (venv) not found and uvicorn is not in PATH!${NC}"
+    echo -e "${YELLOW}Run: python3 -m venv venv && pip install -r requirements.txt${NC}"
     exit 1
 fi
 
 # Export environment variables from .env if present
 if [ -f ".env" ]; then
     echo -e "${YELLOW}      Loading environment variables from .env...${NC}"
-    export $(grep -v '^#' .env | xargs)
+    set -a
+    . ./.env 2>/dev/null || true
+    set +a
 fi
 
 # Track PID array for cleanup
@@ -56,8 +79,8 @@ cleanup() {
     done
     wait 2>/dev/null || true
     # Final port safety sweep
-    fuser -k 8000/tcp 2>/dev/null || true
-    fuser -k 5173/tcp 2>/dev/null || true
+    free_port 8000
+    free_port 5173
     echo -e "${GREEN}All services stopped cleanly. Goodbye!${NC}"
     exit 0
 }
