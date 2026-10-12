@@ -15,6 +15,7 @@ import {
   FolderIcon
 } from '@heroicons/react/24/solid'
 import WaveSurferPlayer from './WaveSurferPlayer'
+import ManuscriptWorkflow from './ManuscriptWorkflow'
 
 const steps = [
   { id: 0, name: 'PDF Ingestion', desc: '00_scanned.pdf' },
@@ -383,6 +384,10 @@ function ProjectPipeline() {
   const isLoading = loadingDetails || loadingRaw
   const activeSegments = localSegments.length > 0 ? localSegments : segmentsData
   const activePhonetics = localPhonetics.length > 0 ? localPhonetics : (phoneticsData.length > 0 ? phoneticsData : activeSegments)
+
+  if (projectDetails?.manuscript_workflow) {
+    return <ManuscriptWorkflow project={project} token={user.token} projectDetails={projectDetails} />
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">

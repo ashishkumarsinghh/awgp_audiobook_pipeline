@@ -23,6 +23,11 @@ uvicorn api:app --host 127.0.0.1 --port 8000
 For a separately hosted API, set `VITE_API_BASE` before `npm run dev` or
 `npm run build`.
 
+Projects that contain `manuscript.txt` automatically use the manuscript editor.
+Its save, validate, build, submit, and undo actions call the same backend
+editorial service used by `python run.py`; legacy projects continue to use the
+stage-based dashboard.
+
 ## Available commands
 
 - `npm run dev` — development server with hot reload.

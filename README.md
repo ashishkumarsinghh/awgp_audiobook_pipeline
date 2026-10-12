@@ -336,6 +336,11 @@ Projects migrated to the manuscript workflow are intentionally read-only in the
 legacy dashboard. Use the `run.py` edit/build/submit commands and the generated
 review pack documented above for editing and delivery.
 
+The dashboard now detects migrated projects and switches to the same manuscript
+service used by the CLI. It reads and saves `manuscript.txt`, validates the
+authoritative draft, and invokes the shared build/submit/undo operations through
+`/api/projects/<book>/manuscript/...`; it does not create a second stage draft.
+
 Typical roles are:
 
 1. An Editor creates or selects a project, starts the PDF pipeline, and corrects

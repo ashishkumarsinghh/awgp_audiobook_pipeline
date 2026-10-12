@@ -1,6 +1,7 @@
 import os
 import re
 import json
+from dataclasses import asdict
 from contextlib import asynccontextmanager
 from threading import Lock
 from fastapi import Request
@@ -31,6 +32,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import inspect, text
 
 from src.pipeline_v3 import ProjectManager
+from src.editorial.manuscript import parse
+from src.editorial.workspace import Workspace, read_json
 from src.synthesis.providers import VOICE_CATALOG
 from src.synthesis.audio.io import validate_mp3
 from src.db.database import engine, Base, get_db
@@ -176,7 +179,8 @@ def project_access(request: Request, db: Session = Depends(get_db),
         raise HTTPException(403, detail="Invalid project path")
     lock = project_lock(name)
     mutation = request.method in {"POST", "PUT", "PATCH", "DELETE"}
-    if mutation and os.path.isfile(os.path.join(target, "manuscript.txt")):
+    manuscript_endpoint = request.url.path.endswith("/manuscript") or "/manuscript/" in request.url.path
+    if mutation and os.path.isfile(os.path.join(target, "manuscript.txt")) and not manuscript_endpoint:
         # The stage-oriented UI must not maintain a second draft/review ledger
         # after a project explicitly opts into the manuscript workflow.
         raise HTTPException(409, detail="This book uses the manuscript workflow. Use run.py edit/build/submit and the generated review pack; legacy web mutations are disabled for this book.")
@@ -765,6 +769,7 @@ def get_project_details(name: str, db: Session = Depends(get_db), current_user: 
         raise HTTPException(status_code=404, detail="Project not found")
 
     artifacts = _get_project_artifacts(name, p.tts_provider, p.tts_voice)
+    manuscript_path = os.path.join(PROJECTS_DIR, name, "manuscript.txt")
     stage = _effective_stage(p.status, artifacts)
     assigned_user = db.query(User).filter(User.id == p.assigned_to).first() if p.assigned_to else None
     latest_job = db.query(Job).filter(Job.project_name == name).order_by(Job.created_at.desc(), Job.id.desc()).first()
@@ -795,11 +800,83 @@ def get_project_details(name: str, db: Session = Depends(get_db), current_user: 
         "assigned_to_name": assigned_user.username if assigned_user else "Unassigned",
         "assigned_username": assigned_user.username if assigned_user else "Unassigned",
         "is_assigned_to_me": (p.assigned_to == current_user.id),
+        "manuscript_workflow": os.path.isfile(manuscript_path),
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "job": job_payload,
         "artifacts": artifacts,
         **artifacts
     }
+
+
+def _editorial_workspace(project_name: str) -> Workspace:
+    root = FilePath(PROJECTS_DIR, project_name)
+    manuscript = root / "manuscript.txt"
+    if not manuscript.is_file():
+        raise HTTPException(404, detail="This project has not been migrated to the manuscript workflow")
+    return Workspace(root)
+
+
+def _editorial_manager(ws: Workspace, project_name: str) -> ProjectManager:
+    config = read_json(ws.home / "settings.json", {})
+    return ProjectManager(str(ws.root), tts_provider=config.get("provider"),
+                          tts_voice=config.get("voice"), book_name=project_name)
+
+
+@app.get("/api/projects/{project_name}/manuscript")
+def get_manuscript(project_name: str, current_user: User = Depends(get_current_user)):
+    ws = _editorial_workspace(project_name)
+    content = ws.manuscript.read_text(encoding="utf-8")
+    return {"workflow": "manuscript", "content": content,
+            "passages": [asdict(passage) for passage in parse(content)],
+            "revision": read_json(ws.home / "draft.json", {}).get("revision")}
+
+
+@app.put("/api/projects/{project_name}/manuscript")
+def save_manuscript(project_name: str, payload: dict, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    content = payload.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise HTTPException(422, detail="Manuscript content cannot be empty")
+    ws = _editorial_workspace(project_name)
+    try:
+        with ws.lock():
+            passages = ws.save(content, accept_speech=bool(payload.get("accept_speech", False)))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+    db.add(AuditLog(project_name=project_name, stage="manuscript", action="SAVED MANUSCRIPT",
+                    user_id=current_user.id))
+    db.commit()
+    return {"status": "success", "revision": read_json(ws.home / "draft.json", {}).get("revision"),
+            "passages": [asdict(passage) for passage in passages]}
+
+
+@app.post("/api/projects/{project_name}/manuscript/{action}")
+def run_manuscript_action(project_name: str, action: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    if action not in {"validate", "build", "submit", "undo"}:
+        raise HTTPException(404, detail="Unsupported manuscript action")
+    ws = _editorial_workspace(project_name)
+    try:
+        with ws.lock():
+            manager = _editorial_manager(ws, project_name)
+            if action == "validate":
+                ws._compiled(manager)
+                result = {"status": "validated"}
+            elif action == "build":
+                record = ws.build(manager)
+                result = {"status": record["status"], "build_id": record["id"],
+                          "total": record["total"], "reused": record.get("reused", 0)}
+            elif action == "submit":
+                version = ws.submit(manager)
+                result = {"status": "submitted", "version": version["id"],
+                          "review_dir": str(ws.home / "reviews" / version["id"])}
+            else:
+                ws.undo()
+                result = {"status": "undone"}
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+    db.add(AuditLog(project_name=project_name, stage="manuscript", action=f"MANUSCRIPT {action.upper()}",
+                    user_id=current_user.id))
+    db.commit()
+    return result
 
 
 @app.get("/api/projects/{project_name}/jobs/{job_id}")
