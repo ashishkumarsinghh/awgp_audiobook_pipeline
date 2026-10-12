@@ -29,8 +29,8 @@ function Login() {
       } else {
         setErrorMessage(data.detail || 'Invalid username or password.');
       }
-    } catch (err) {
-      setErrorMessage('Could not connect to backend server on ${API_BASE}. Please ensure the server is running.');
+    } catch {
+      setErrorMessage(`Could not connect to backend server on ${API_BASE}. Please ensure the server is running.`);
     } finally {
       setLoading(false);
     }

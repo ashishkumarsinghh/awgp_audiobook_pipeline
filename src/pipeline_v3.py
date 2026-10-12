@@ -12,6 +12,7 @@ load_dotenv()
 
 import fitz
 from src.core.artifacts import atomic_write, write_json, read_segments
+from src.core.corrections import load_corrections, corrections_for, matching, remove_segments, apply_source_corrections
 from src.synthesis.runner import synthesize_segments, as_segment, load_manifest, is_current
 
 from src.core.types import NarrationProfile, SpeechSegment
@@ -22,6 +23,7 @@ from src.synthesis.prosody import ProsodyPlanner
 from src.synthesis.providers import EdgeTTSProvider, GeminiTTSProvider, GoogleCloudTTSProvider, AzureSpeechProvider, GoogleAIStudioTTSProvider, SarvamTTSProvider
 from src.synthesis.assembler import AudioAssembler
 from src.synthesis.audio.enhancer import AudioEnhancer
+from src.qa.text_review import run_text_review
 
 
 def normalize_cli_path(p: Optional[str]) -> Optional[str]:
@@ -92,6 +94,7 @@ class ProjectManager:
         self.prosody = ProsodyPlanner(self.profile)
         self.tts_provider = (tts_provider or os.environ.get('TTS_PROVIDER', 'edge')).lower()
         self.tts = self._get_tts_provider(tts_voice)
+        self.corrections = load_corrections(self.project_dir)
 
     def _sync_audio_folders(self):
         """Keep 05_audio_chunks and 03_audio in sync."""
@@ -354,14 +357,29 @@ class ProjectManager:
                 "segment_type": seg.segment_type,
                 "pause_after_ms": seg.pause_after_ms
             }
+            if seg.pronunciation_text != seg.source_text:
+                chunk_dict["pronunciation_audit"] = [{
+                    "stage": "pronunciation",
+                    "kind": "tts_alias",
+                    "source": seg.source_text,
+                    "replacement": seg.pronunciation_text,
+                    "reason": "Active production pronunciation configuration; source text is preserved."
+                }]
             if seg.page is not None:
                 chunk_dict["page"] = seg.page
             if seg.paragraph is not None:
                 chunk_dict["paragraph"] = seg.paragraph
             data.append(chunk_dict)
 
+        data = apply_source_corrections(data, self.corrections)
+        for chunk_dict in data:
+            if chunk_dict.get("content_correction_audit"):
+                chunk_dict.setdefault("integrity_audit", []).extend(chunk_dict.pop("content_correction_audit"))
 
-
+        before = len(data)
+        data = remove_segments(data, self.corrections)
+        if len(data) != before:
+            print(f"[Stage 1: Segmentation] Removed {before - len(data)} declared editorial segment(s).")
         write_json(target_out, data)
         if target_out != self.segments_file:
             write_json(self.segments_file, data)
@@ -394,6 +412,9 @@ class ProjectManager:
 
         print(f"[Stage 2: Phonetics] Reading segments from: {target_in}")
         data = read_segments(target_in)
+        # Always run the local anomaly pass before preparing TTS input.  The
+        # optional LLM review is a separate, approval-gated operation.
+        run_text_review(self.project_dir, segments_file=target_in)
 
         segments = []
         for item in data:
@@ -402,41 +423,45 @@ class ProjectManager:
                 normalized_text=item.get("source_text", ""),
                 pronunciation_text=item.get("source_text", ""),
                 segment_type=item.get("segment_type", "prose"),
-                pause_after_ms=item.get("pause_after_ms", 0)
+                pause_after_ms=item.get("pause_after_ms", 0),
+                page=item.get("page"),
+                paragraph=item.get("paragraph")
             )
             seg.pronunciation_text = self.pronunciation.apply(seg.source_text, context=seg.segment_type)
             segments.append(seg)
 
         segments = self.prosody.apply_prosody(segments)
 
-        ai_fixes_path = os.path.join(self.project_dir, 'ai_audio_fixes.json')
-        ai_fixes = []
-        if os.path.isfile(ai_fixes_path):
-            try:
-                with open(ai_fixes_path, 'r', encoding='utf-8') as f:
-                    ai_fixes = json.load(f)
-            except Exception as e:
-                print(f"[Warning] Could not parse {ai_fixes_path}: {e}")
-
         out_data = []
         for i, seg in enumerate(segments):
             orig_item = data[i]
             page_val = orig_item.get("page")
             para_val = orig_item.get("paragraph")
+            pronunciation_audit = []
+            if seg.pronunciation_text != seg.source_text:
+                pronunciation_audit.append({
+                    "stage": "pronunciation",
+                    "kind": "tts_alias",
+                    "source": seg.source_text,
+                    "replacement": seg.pronunciation_text,
+                    "reason": "Active production pronunciation configuration; source text is preserved."
+                })
             
-            # Apply AI Audio Fixes
-            if page_val is not None:
-                for fix in ai_fixes:
-                    if fix.get("page") == page_val:
-                        if fix.get("paragraph") is not None and fix.get("paragraph") != para_val:
-                            continue
-                        
-                        find_text = fix.get("find_text", "")
-                        if find_text and find_text in seg.source_text:
-                            if "tts_override" in fix:
-                                seg.pronunciation_text = seg.pronunciation_text.replace(find_text, fix["tts_override"])
-                            if "pause_after_ms" in fix:
-                                seg.pause_after_ms = fix["pause_after_ms"]
+            for fix in corrections_for("phonetics", self.corrections):
+                if matching(fix, orig_item):
+                    find_text = fix.get("find") or fix.get("find_text")
+                    replacement = fix.get("replace") or fix.get("tts_override")
+                    if find_text and replacement is not None:
+                        seg.pronunciation_text = seg.pronunciation_text.replace(find_text, replacement)
+                        pronunciation_audit.append({
+                            "stage": "phonetics",
+                            "kind": fix.get("kind", "pronunciation"),
+                            "source": find_text,
+                            "replacement": replacement,
+                            "reason": fix.get("reason", "Approved project correction")
+                        })
+                    if "pause_after_ms" in fix:
+                        seg.pause_after_ms = int(fix["pause_after_ms"])
 
             chunk_dict = {
                 "id": orig_item["id"],
@@ -453,6 +478,8 @@ class ProjectManager:
                 chunk_dict["page"] = page_val
             if para_val is not None:
                 chunk_dict["paragraph"] = para_val
+            if pronunciation_audit:
+                chunk_dict["pronunciation_audit"] = pronunciation_audit
             out_data.append(chunk_dict)
 
 
@@ -563,6 +590,25 @@ class ProjectManager:
 
         segments = [as_segment(item, target_audio_dir) for item in data]
         AudioAssembler(target_out, speed=target_speed, eq_profile=target_eq).assemble(segments)
+        # Persist the playback coordinate system used by human review.  The
+        # assembler inserts boundary pauses and applies tempo, so offsets must
+        # be computed after both are known rather than inferred from chunk IDs.
+        offsets = []
+        cursor = 0.0
+        for item in data:
+            duration = float(records[item["id"]].get("duration_seconds", 0.0))
+            pause = float(item.get("pause_after_ms", 0) or 0) / 1000.0
+            start = cursor / target_speed
+            cursor += duration + pause
+            offsets.append({"chunk_id": item["id"], "page": item.get("page"),
+                            "paragraph": item.get("paragraph"),
+                            "start_seconds": round(start, 3),
+                            "end_seconds": round(cursor / target_speed, 3),
+                            "source_text": item.get("source_text", "")})
+        write_json(os.path.join(self.stage4_dir, "offsets.json"), {
+            "version": 1, "master": target_out, "speed": target_speed,
+            "offsets": offsets
+        })
 
         # Apply metadata tags
         meta = self.resolve_metadata(metadata)
@@ -837,6 +883,15 @@ Usage examples:
     python run.py my_book           # Show dashboard/status for 'my_book'
     python run.py my_book 0         # Run Stage 0 (OCR) for 'my_book'
     python run.py my_book all       # Run all stages sequentially
+
+Manuscript editing (opt-in; book remembered after first command):
+    python run.py my_book edit      # Import manuscript and open editor
+    python run.py edit p35          # Jump to printed page
+    python run.py find "phrase"     # Find passage IDs
+    python run.py preview           # Listen to selected passage
+    python run.py build             # Automatically rebuild changed audio
+    python run.py submit            # Version and offline checker pack
+    python run.py edit --help       # Editorial command options
     
 Stages:
     0 or ocr        : Extract text from PDF
@@ -920,6 +975,21 @@ Resumability:
         manager.print_dashboard()
         return
 
+    # Once migrated, manuscript.txt is the sole editing source. Never silently
+    # rebuild an older JSON draft through the compatibility stage commands.
+    if os.path.isfile(os.path.join(manager.project_dir, "manuscript.txt")):
+        if str(target_stage).lower() == "all":
+            from src.editorial.cli import main as editorial_main
+            if args.force or args.input or args.output or args.audio_dir or args.page or args.max_pages:
+                raise SystemExit("Use build for the manuscript, or reocr for a separate OCR comparison. Stage overrides are not supported after migration.")
+            options = []
+            for key in ("provider", "voice", "speed", "eq", "title", "artist"):
+                value = getattr(args, key)
+                if value is not None:
+                    options.extend([f"--{key}", str(value)])
+            raise SystemExit(editorial_main([manager.project_dir, "build", *options]))
+        raise SystemExit("This book uses manuscript.txt. Use edit, preview, build or reocr; legacy stage commands are disabled for this book.")
+
     pages_to_process = [args.page] if args.page else None
     cli_input = normalize_cli_path(args.input)
 
@@ -934,6 +1004,11 @@ Resumability:
         manager.run_stage_3_audio(audio_dir=args.audio_dir)
         manager.run_stage_4_mastering(audio_dir=args.audio_dir, speed=args.speed, eq_profile=args.eq, force=args.force)
         manager.run_stage_6_metadata()
+        # Deterministic QA is part of the normal all-stages workflow.  ASR is
+        # intentionally separate because it is model-dependent and slower.
+        from src.qa.audio_qa import run_audio_qa
+        qa_report = run_audio_qa(manager.project_dir)
+        print(f"[QA] {qa_report['status'].upper()} - {qa_report['summary']}")
         manager.print_dashboard()
     else:
         stage_num = parse_stage(target_stage)

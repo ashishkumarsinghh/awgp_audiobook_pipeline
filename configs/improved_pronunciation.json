@@ -77,7 +77,7 @@
     },
     {
       "source": "दुःख",
-      "tts_alias": "दु:ख",
+      "tts_alias": "दुख",
       "context": "pronunciation fix"
     },
     {
@@ -97,7 +97,7 @@
     },
     {
       "source": "निश्चित",
-      "tts_alias": "निश्चत",
+      "tts_alias": "निश्चित",
       "context": "pronunciation fix"
     },
     {
@@ -107,7 +107,7 @@
     },
     {
       "source": "दुःखमय",
-      "tts_alias": "दु:खमय",
+      "tts_alias": "दुखमय",
       "context": "pronunciation fix"
     },
     {
@@ -219,6 +219,31 @@
       "source": "निर्बल",
       "tts_alias": "निरबल",
       "context": "pronunciation fix"
+    },
+    {
+      "source": "दुख",
+      "tts_alias": "दुख",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "मुरदादिली",
+      "tts_alias": "मुरदा दिली",
+      "context": "pronunciation fix"
+    },
+    {
+      "source": "बड़ी-बड़ी",
+      "tts_alias": "बड़ी बड़ी",
+      "context": "hyphenated-compound"
+    },
+    {
+      "source": "सफलता-असफलता",
+      "tts_alias": "सफलता असफलता",
+      "context": "hyphenated-compound"
+    },
+    {
+      "source": "बाधा-कठिनाई",
+      "tts_alias": "बाधा कठिनाई",
+      "context": "hyphenated-compound"
     },
     {
       "source": "बी० ए०",

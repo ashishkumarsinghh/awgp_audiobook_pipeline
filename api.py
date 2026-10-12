@@ -176,6 +176,10 @@ def project_access(request: Request, db: Session = Depends(get_db),
         raise HTTPException(403, detail="Invalid project path")
     lock = project_lock(name)
     mutation = request.method in {"POST", "PUT", "PATCH", "DELETE"}
+    if mutation and os.path.isfile(os.path.join(target, "manuscript.txt")):
+        # The stage-oriented UI must not maintain a second draft/review ledger
+        # after a project explicitly opts into the manuscript workflow.
+        raise HTTPException(409, detail="This book uses the manuscript workflow. Use run.py edit/build/submit and the generated review pack; legacy web mutations are disabled for this book.")
     if mutation and "stage" not in request.path_params:
         if not lock.acquire(blocking=False):
             raise HTTPException(409, detail="A project operation is running. Wait before editing.")
@@ -1227,6 +1231,8 @@ def _execute_queued_job(job_id: int, database_bind) -> str:
         actor_id = actor.id if actor else None
         actor_name = actor.username if actor else "system"
         pm = ProjectManager(os.path.join(PROJECTS_DIR, job.project_name), project.tts_provider, project.tts_voice)
+        if os.path.isfile(os.path.join(pm.project_dir, "manuscript.txt")):
+            raise ValueError("Project migrated to manuscript workflow; queued legacy stage job cancelled. Use run.py build.")
         if job.stage == "all":
             # A full rebuild reuses a reviewed source by default. OCR is an
             # explicit intake operation; rerunning it would overwrite paper

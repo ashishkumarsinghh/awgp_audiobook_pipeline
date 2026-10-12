@@ -4,6 +4,7 @@ import asyncio
 import edge_tts
 import tempfile
 import html
+import xml.etree.ElementTree as ET
 import wave
 import base64
 import httpx
@@ -183,13 +184,21 @@ class AzureSpeechProvider(TTSProvider):
 
     async def synthesize(self, segment: SpeechSegment, output_path: str) -> str:
         text = segment.pronunciation_text or segment.normalized_text or segment.source_text
-        text = re.sub(r"<[^>]+>", "", text or "").strip()
+        text = (text or "").strip()
         if not text:
             raise ValueError("Cannot synthesize empty narration.")
         if not str(output_path).lower().endswith(".wav"):
             raise ValueError("Azure Speech output must be .wav.")
         speechsdk, config = self._speech_config()
-        escaped = html.escape(text)
+        if re.search(r"</?[A-Za-z][^>]*>", text):
+            from src.editorial.manuscript import validate_ssml
+            validate_ssml(text, "azure")
+            root = ET.fromstring(text if text.startswith("<speak") else f"<speak>{text}</speak>")
+            for node in root.iter():
+                node.tag = node.tag.split("}")[-1]
+            escaped = html.escape(root.text or "") + "".join(ET.tostring(child, encoding="unicode") for child in root)
+        else:
+            escaped = html.escape(text)
         ssml = (f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
                 f'xml:lang="hi-IN"><voice name="{html.escape(self.voice)}">'
                 f'<prosody rate="{segment.rate or "+0%"}" pitch="{segment.pitch or "+0Hz"}" '

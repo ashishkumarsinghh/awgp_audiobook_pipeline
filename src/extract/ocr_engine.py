@@ -27,7 +27,8 @@ def extract_text_from_pdf(
     max_pages: Optional[int] = None,
     checkpoint_dir: Optional[str] = None,
     book_name: Optional[str] = None,
-    pages_to_process: Optional[List[int]] = None
+    pages_to_process: Optional[List[int]] = None,
+    prefer_embedded: bool = False,
 ) -> str:
     if max_pages is not None and (type(max_pages) is not int or max_pages < 1):
         raise ValueError("max_pages must be a positive integer.")
@@ -100,7 +101,10 @@ def extract_text_from_pdf(
                     continue
 
                 page = doc.load_page(index)
-                if client is None:
+                embedded = _extract_embedded_page_text(page, repeated_margin_rects.get(index, ())) if prefer_embedded else ""
+                embedded_usable = (len(embedded.strip()) >= 40 and "\ufffd" not in embedded
+                                   and "(cid:" not in embedded and sum(c.isalpha() for c in embedded) >= 20)
+                if client is None or (prefer_embedded and embedded_usable):
                     text = _extract_embedded_page_text(page, repeated_margin_rects.get(index, ()))
                     if not text:
                         if page.get_text("blocks"):

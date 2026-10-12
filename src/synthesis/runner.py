@@ -25,6 +25,9 @@ def fingerprint(item, provider, voice):
         "volume": item.get("volume", "+0%"),
     }
     payload = {"version": 3, "provider": provider, "voice": voice, "segment": speech_fields}
+    # Explicit fresh take without changing text; preserve legacy hashes for take 0.
+    if item.get("take"):
+        payload["take"] = item["take"]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -37,6 +40,20 @@ def audio_digest(path):
 
 def _word_count(text: str) -> int:
     return len([token for token in (text or "").split() if token.strip()])
+
+
+def _text_digest(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _provenance(item):
+    return {
+        "page": item.get("page"),
+        "paragraph": item.get("paragraph"),
+        "segment_type": item.get("segment_type", "prose"),
+        "source_text_sha256": _text_digest(item.get("source_text", "")),
+        "spoken_text_sha256": _text_digest(item.get("pronunciation_text", item.get("source_text", ""))),
+    }
 
 
 def as_segment(item, audio_dir):
@@ -108,7 +125,7 @@ async def synthesize_segments(data, audio_dir, tts, provider, *, attempts=2, con
         
         old_record = old.get(chunk_id, {})
         if old_record.get("status") == "complete" and old_record.get("fingerprint") == fp and is_current(item, old_record, audio_dir, provider, voice):
-            records[chunk_id] = old_record
+            records[chunk_id] = {**old_record, **_provenance(item)}
             if fp in available_old_chunks and chunk_id in available_old_chunks[fp]:
                 available_old_chunks[fp].remove(chunk_id)
         else:
@@ -134,7 +151,7 @@ async def synthesize_segments(data, audio_dir, tts, provider, *, attempts=2, con
                     # Cyclic reorders must never overwrite another source that
                     # a later chunk still needs.
                     shutil.copy2(old_path, new_path)
-                records[chunk_id] = old[reused_id].copy()
+                records[chunk_id] = {**old[reused_id], **_provenance(item)}
             else:
                 records[chunk_id] = {
                     "status": "pending", "fingerprint": fp
@@ -176,7 +193,7 @@ async def synthesize_segments(data, audio_dir, tts, provider, *, attempts=2, con
                     wpm = round(words / duration * 60, 1) if duration else 0
                     record.update(status="complete", duration_seconds=duration, sha256=digest,
                                   size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns,
-                                  word_count=words, measured_wpm=wpm)
+                                  word_count=words, measured_wpm=wpm, **_provenance(item))
                     # Provider pace varies by voice and language. Keep the
                     # measured value visible so editors can correct outliers
                     # instead of silently accepting a drifting reading speed.

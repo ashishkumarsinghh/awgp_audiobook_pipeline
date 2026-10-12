@@ -1,5 +1,27 @@
 # AWGP Audiobook Pipeline
 
+## New manuscript editing workflow (CLI)
+
+```sh
+python run.py BOOK edit --no-open   # Import existing accepted text once
+python run.py edit p35             # Open manuscript.txt at the printed page
+python run.py find "मुगल"           # Search transcript and speech overrides
+python run.py preview              # Listen to the selected passage and context
+python run.py build                # Reuse unchanged speech and rebuild audio
+python run.py submit               # Create a fixed version and offline checker pack
+```
+
+The book and selected passage are remembered. Set `AUDIOBOOK_EDITOR` to your
+preferred editor. New PDFs can start with `python run.py /path/book.pdf import`.
+Once migrated, edit `manuscript.txt`; stage JSON is no longer authoritative.
+Checkers open the submitted folder's `index.html` and download feedback for
+`python run.py feedback --input feedback.json`.
+
+See [the complete editing, review, and delivery guide](docs/editorial-workflow.md)
+for SSML, version-specific timestamps, undo, approvals, migration boundaries,
+and the legacy web UI restriction for migrated books. The stage instructions
+below continue to apply to **unmigrated** projects.
+
 Convert scanned Hindi/Sanskrit books into reviewed, resumable audiobooks.
 
 The pipeline keeps two separate representations:
@@ -257,6 +279,37 @@ Before publishing, review:
 
 ## 8. Editor and Checker web workflow
 
+## 8.5 Automated audiobook QA
+
+Run the fast deterministic gate after audio/mastering, or let `all` run it
+automatically:
+
+~~~sh
+venv/bin/python scripts/run_audio_qa.py projects/<book>
+~~~
+
+It checks stage counts and order, source-text drift, provenance, unresolved
+OCR, pronunciation contracts, chunk integrity, clipping, silence, pace, the
+final MP3, and final-master playback offsets. Results are written to
+`07_qa/report.json`; `FAIL` blocks delivery and `REVIEW` requires a checker.
+
+For a quick checker-like listening proxy, use a reproducible risk sample. It
+prints progress and ETA, caches by audio hash plus recognizer settings, and
+never treats low-confidence or romanized ASR as proof of correct pronunciation:
+
+~~~sh
+venv/bin/python scripts/run_checker_simulation.py projects/<book> \
+  --model tiny --sample-percent 10 --max-chunks 24
+~~~
+
+Use `--all` only for a deliberate release audit. The optional backend is
+`faster-whisper`; its Hindi output is useful for omissions, insertions, and
+word-level disagreement, but Sanskrit and pronunciation quality still require
+human listening. Missing dependencies produce `NOT_EVALUATED`, not `PASS`.
+Pronunciation aliases are scoped to the production configuration and project;
+source text is retained separately and reviewer suggestions such as editorial
+deletions require explicit approval.
+
 The API and React dashboard are intended for editors and Checkers who should not
 need to edit JSON files manually.
 
@@ -278,6 +331,10 @@ npm run dev
 Open the URL printed by Vite (normally `http://localhost:5173`). The Vite
 development proxy forwards `/api` requests to the API on port 8000. For a
 different API host, set `VITE_API_BASE` before starting Vite.
+
+Projects migrated to the manuscript workflow are intentionally read-only in the
+legacy dashboard. Use the `run.py` edit/build/submit commands and the generated
+review pack documented above for editing and delivery.
 
 Typical roles are:
 
@@ -319,3 +376,20 @@ see [the feedback workflow implementation guide](docs/feedback-workflow-implemen
 - **OCR is uncertain:** resolve every `[???????]` marker before synthesis.
 - **The UI cannot reach the API:** confirm `uvicorn` is listening on port 8000,
   or set `VITE_API_BASE` to the reachable API URL.
+# Sentence-level feedback review
+
+Romanized checker notes and historical timestamps are not reliable enough to select
+review clips: timestamps can move between masters, and a note such as `gali gali`
+may refer to only part of a long segment. Build the sentence-level review pack to
+match each note against the Hindi source and show the exact source and spoken text:
+
+```bash
+venv/bin/python scripts/build_sentence_review_pack.py \
+  projects/HINR0791_MAN_SADHE_JIVAN_SADHEI_Re2014_google_tts
+```
+
+Open the generated `07_qa/sentence_review_pack/index.html`. Candidate matches are
+kept separate from `needs_human_selection`; unresolved notes are never silently
+attached to a nearby sentence. Optional isolated diagnostic clips can be generated
+with `--synthesize`, but that invokes Google TTS and should only be used when the
+extra provider usage is authorized.

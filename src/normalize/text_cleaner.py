@@ -27,7 +27,7 @@ METADATA_HEADER_PATTERN = re.compile(
 PUBLISHING_METADATA_PATTERN = re.compile(
     r'(?:युग\s*निर्माण\s*योजना|गायत्री\s*तपोभूमि|अखण्ड\s*ज्योति\s*संस्थान|'
     r'मथुरा\s*[-–—]\s*[२2][८8][१1][०0][०0][३3]|शांतिकुंज\s*,\s*हरिद्वार|'
-    r'प्रथम\s*संस्करण|द्वितीय\s*संस्करण|पुनर्मुद्रण|मूल्य\s*:\s*रू|'
+    r'प्रथम\s*संस्करण|द्वितीय\s*संस्करण|पुनर्मुद्रण|पुनरावृत्ति|मूल्य\s*[:：]|'
     r'सर्वाधिकार\s*प्रकाशकाधीन|मुद्रक\s*:\s*)',
     re.IGNORECASE
 )
@@ -48,6 +48,23 @@ def fix_ocr_punctuation(text: str) -> str:
     """Converts English pipe characters to Hindi dandas."""
     text = text.replace('||', '॥')
     text = text.replace('|', '।')
+    return text
+
+
+def strip_ocr_control_markers(text: str) -> str:
+    """Remove OCR transport markers before they can reach narration.
+
+    Page delimiters belong to the OCR transport format, never to spoken
+    content.  Accept both the canonical delimiter and common literalized
+    variants produced when a model echoes the instruction.
+    """
+    patterns = (
+        r"={2,}\s*PAGE[_ -]?BREAK\s*={2,}",
+        r"\bPAGE[_ -]?BREAK\b",
+        r"(?:\bequals\b\s*){2,}\bpage\s*break\b",
+    )
+    for pattern in patterns:
+        text = re.sub(pattern, "\n\n", text, flags=re.IGNORECASE)
     return text
 
 
@@ -243,11 +260,14 @@ def clean_book_headers_and_metadata(text: str, book_title: Optional[str] = None)
     if not text or not text.strip():
         return ""
 
-    # 1. Fix known OCR tag typos
+    # 1. Remove transport markers before parsing blocks.
+    text = strip_ocr_control_markers(text)
+
+    # 2. Fix known OCR tag typos
     for pat, repl in TAG_TYPOS:
         text = re.sub(pat, repl, text, flags=re.IGNORECASE)
 
-    # 2. Fix OCR punctuation (pipe to danda)
+    # 3. Fix OCR punctuation (pipe to danda)
     text = fix_ocr_punctuation(text)
 
     # Parse XML blocks

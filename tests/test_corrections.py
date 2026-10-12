@@ -2,6 +2,38 @@ import json
 from pathlib import Path
 
 from src.db.models import Project, Candidate, Correction
+from src.core.corrections import matching, remove_segments, apply_source_corrections
+
+
+def test_declarative_corrections_are_stage_scoped_and_source_preserving():
+    items = [
+        {"id": "a", "page": 43, "source_text": "लेखक का संक्षिप्त परिचय", "segment_type": "heading"},
+        {"id": "b", "page": 6, "source_text": "बड़ी-बड़ी बातें", "segment_type": "prose"},
+    ]
+    config = {"corrections": [
+        {"stage": "segment", "find": "संक्षिप्त परिचय"},
+        {"stage": "phonetics", "page": 6, "find": "बड़ी-बड़ी", "replace": "बड़ी बड़ी"},
+    ]}
+    kept = remove_segments(items, config)
+    assert [item["id"] for item in kept] == ["a", "b"]
+    config["corrections"][0]["approved"] = True
+    kept = remove_segments(items, config)
+    assert [item["id"] for item in kept] == ["b"]
+    assert matching(config["corrections"][1], kept[0])
+    assert kept[0]["source_text"] == "बड़ी-बड़ी बातें"
+
+
+def test_approved_source_correction_is_audited_and_unapproved_exclusion_stays_safe():
+    items = [{"id": "a", "page": 21, "source_text": "यह हो सकती संभव है।"}]
+    config = {"corrections": [{
+        "stage": "segment", "kind": "ocr_correction", "page": 21,
+        "find": "हो सकती संभव है", "replace": "हो सकनी संभव है",
+        "approved": True, "reason": "PDF verified"
+    }]}
+
+    corrected = apply_source_corrections(items, config)
+    assert corrected[0]["source_text"] == "यह हो सकनी संभव है।"
+    assert corrected[0]["content_correction_audit"][0]["kind"] == "ocr_correction"
 
 
 def test_correction_preview_apply_is_versioned_and_exact(client, db_session, tmp_path, monkeypatch):

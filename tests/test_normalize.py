@@ -49,6 +49,14 @@ def test_clean_writer_and_publisher_headers():
     assert "<heading>मन के हारे हार है, मन के जीते जीत</heading>" in cleaned
     assert "कहा जाता है" in cleaned
 
+
+def test_cleaner_removes_revision_and_price_metadata():
+    raw_ocr = "<prose>पुनरावृत्ति सन् २०१४ मूल्य : ७.०० रुपये</prose>\n<prose>यह वास्तविक पाठ है।</prose>"
+    cleaned = clean_book_headers_and_metadata(raw_ocr)
+    assert "पुनरावृत्ति" not in cleaned
+    assert "मूल्य" not in cleaned
+    assert "यह वास्तविक पाठ है" in cleaned
+
 def test_clean_running_headers_and_page_numbers():
     raw_ocr = (
         "<prose>पेरिस का पतन हो चुका था, किंतु मन संधे जीवन सधे ) ( ५</prose>\n"
@@ -86,6 +94,17 @@ def test_cross_page_sentence_stitching_heals_broken_sentences():
     segments = SemanticSegmenter().segment_text(raw_ocr)
     assert len(segments) == 1
     assert "नौबत यहाँ तक आ पहुँचा कि" in segments[0].source_text
+
+
+def test_ocr_page_break_transport_markers_never_reach_narration():
+    from src.normalize.text_cleaner import clean_book_headers_and_metadata
+
+    cleaned = clean_book_headers_and_metadata(
+        "<prose>पहला वाक्य===PAGE_BREAK===दूसरा वाक्य।</prose>"
+    )
+    assert "PAGE_BREAK" not in cleaned
+    assert "equals" not in cleaned.lower()
+    assert "पहला वाक्य" in cleaned and "दूसरा वाक्य" in cleaned
 
 
 def test_cross_page_deduplicates_overlapping_catchwords():

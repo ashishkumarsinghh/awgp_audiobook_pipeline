@@ -4,6 +4,13 @@
 Usage from root folder:
     python run.py <book_name> <stage>
 
+Manuscript workflow (book remembered after first command):
+    python run.py <book_name> edit
+    python run.py edit p35
+    python run.py preview
+    python run.py build
+    python run.py submit
+
 Stages:
     0 or ocr          Stage 0: Extract text from PDF into 00_ocr/ocr_raw.txt
     1 or segment      Stage 1: Segment text from 00_ocr/ into 01_segments/segments.json
@@ -21,4 +28,7 @@ import sys
 from src.pipeline_v3 import main
 
 if __name__ == "__main__":
+    from src.editorial.cli import handles, main as editorial_main
+    if handles(sys.argv[1:]):
+        sys.exit(editorial_main())
     main()
