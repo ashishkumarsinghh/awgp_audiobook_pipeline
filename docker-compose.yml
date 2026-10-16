@@ -9,9 +9,10 @@ services:
       - "80:8000"
     volumes:
       - ./projects:/app/projects
-      - ./audiobook_pipeline.db:/app/audiobook_pipeline.db
+      - ./data:/app/data
     env_file:
       - .env
     environment:
       - PORT=8000
       - PROJECTS_DIR=/app/projects
+      - DATABASE_URL=sqlite:////app/data/audiobook_pipeline.db
