@@ -295,12 +295,15 @@ def _transcribe_page_batch(client: genai.Client, batch_images: list, batch_page_
 
         except Exception as exc:
             err_str = str(exc)
+            print(f"[Stage 0: OCR Error] Attempt {attempt+1}/{max_attempts} with model '{model_name}': {err_str}")
+            if "prepayment credits are depleted" in err_str or "402" in err_str or "API_KEY_INVALID" in err_str or "CONSUMER_INVALID" in err_str:
+                raise RuntimeError(f"Gemini API error (prepayment credits depleted or invalid key): {exc}") from exc
             if ("404" in err_str or "503" in err_str or "RESOURCE_EXHAUSTED" in err_str) and model_name != "gemini-3.5-flash-lite":
                 print(f"  [ModelFallback] Switching to gemini-3.5-flash-lite...")
                 model_name = "gemini-3.5-flash-lite"
                 continue
             if attempt < max_attempts - 1:
-                time.sleep(15 * (attempt + 1))
+                time.sleep(10 * (attempt + 1))
                 continue
             raise RuntimeError(f"Batch OCR failed: {exc}") from exc
 
@@ -492,6 +495,9 @@ def _transcribe_page(client, img_bytes, page_number):
             return text
         except Exception as exc:
             err_str = str(exc)
+            print(f"[Stage 0: Single Page OCR Error] Page {page_number}, attempt {attempt+1}/{max_attempts}: {err_str}")
+            if "prepayment credits are depleted" in err_str or "402" in err_str or "API_KEY_INVALID" in err_str or "CONSUMER_INVALID" in err_str:
+                raise RuntimeError(f"Gemini API error (prepayment credits depleted or invalid key): {exc}") from exc
             if ("404" in err_str or "503" in err_str or "RESOURCE_EXHAUSTED" in err_str or "GenerateRequestsPerDay" in err_str) and model_name != "gemini-3.5-flash-lite":
                 print(f"  [ModelFallback] {model_name} quota exceeded or unavailable. Switching to gemini-3.5-flash-lite...")
                 model_name = "gemini-3.5-flash-lite"
