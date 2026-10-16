@@ -1697,6 +1697,23 @@ def analyze_pronunciation_marks(text: str = Query(..., min_length=1)):
     from src.normalize.pronunciation import PronunciationDictionary
     return PronunciationDictionary.analyze_marks(text)
 
+# Serve frontend build in production
+frontend_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
+if os.path.isdir(frontend_dist):
+    from fastapi.staticfiles import StaticFiles
+    assets_dir = os.path.join(frontend_dist, "assets")
+    if os.path.isdir(assets_dir):
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+        file_path = os.path.join(frontend_dist, full_path)
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(frontend_dist, "index.html"))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

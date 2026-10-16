@@ -1,0 +1,14 @@
+venv/
+.venv/
+node_modules/
+frontend/node_modules/
+__pycache__/
+*.pyc
+.git/
+.pytest_cache/
+run_logs/
+projects/
+audiobook_pipeline.db
+audiobook_pipeline.db.backup*
+*.pdf
+.editorial-session.json
